@@ -1,3 +1,3 @@
 mod dns;
-mod icmp;
+pub mod icmp;
 mod ntp;
