@@ -1,17 +1,8 @@
+use super::common::{Error, convert_error};
 use std::net::Ipv6Addr;
 use zerocopy::TryFromBytes;
 
 pub const ICMP6_NH_NUMBER: u8 = 58;
-
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum Error {
-    //#[error("ICMPv6 checksum mismatch")]
-    //BadIcmpChecksum,
-    #[error("Unexpected ICMPv6 echo request")]
-    UnexpectedEchoRequest,
-    #[error("Parsing error at {0}: {1}")]
-    ParseError(&'static str, String),
-}
 
 #[derive(
     zerocopy_derive::TryFromBytes,
@@ -26,7 +17,7 @@ pub enum Error {
     Hash,
 )]
 #[repr(C)]
-pub struct Ip6Header {
+pub struct IpHeader {
     pub version_traffic_class_flow_label: [u8; 4],
     pub payload_length: [u8; 2],
     pub next_header: u8,
@@ -36,7 +27,7 @@ pub struct Ip6Header {
 }
 
 #[allow(dead_code)]
-impl Ip6Header {
+impl IpHeader {
     pub const fn version(&self) -> u8 {
         self.version_traffic_class_flow_label[0] >> 4
     }
@@ -48,6 +39,18 @@ impl Ip6Header {
     }
     pub const fn destination_ip(&self) -> Ipv6Addr {
         Ipv6Addr::from_octets(self.destination_ip)
+    }
+    pub const fn is_icmp(&self) -> bool {
+        self.next_header == ICMP6_NH_NUMBER
+    }
+    /// Exactly `try_ref_from_prefix` with a check for the version field.
+    /// The suffix `_skip_option` is meaningless and just to match the IPv4 counterpart.
+    pub fn try_parse_ref_skip_option(packet: &[u8]) -> Result<(Self, &[u8]), Error> {
+        let (header, packet) = Self::try_ref_from_prefix(packet).map_err(convert_error)?;
+        if header.version() != 6 {
+            return Err(Error::NotIp6);
+        }
+        Ok((*header, packet))
     }
 }
 
@@ -65,7 +68,7 @@ impl Ip6Header {
 )]
 #[repr(u8)]
 #[allow(dead_code)]
-pub enum Icmp6Type {
+pub enum IcmpType {
     DestinationUnreachable = 1,
     TimeExceeded = 3,
     EchoRequest = 128,
@@ -85,8 +88,8 @@ pub enum Icmp6Type {
     Hash,
 )]
 #[repr(C)]
-pub struct Icmp6Header {
-    pub icmp_type: Icmp6Type,
+pub struct IcmpHeader {
+    pub icmp_type: IcmpType,
     pub code: u8,
     pub checksum: [u8; 2],
 }
@@ -104,8 +107,8 @@ pub struct Icmp6Header {
     Hash,
 )]
 #[repr(C)]
-pub struct Icmp6EchoHeader {
-    pub header: Icmp6Header,
+pub struct IcmpEchoHeader {
+    pub header: IcmpHeader,
     pub identifier: [u8; 2],
     pub sequence: [u8; 2],
 }
@@ -123,13 +126,12 @@ pub struct Icmp6EchoHeader {
     Hash,
 )]
 #[repr(C)]
-pub struct Icmp6TimeExceededOrUnreachableHeader {
-    pub header: Icmp6Header,
-    pub data: [u8; 4],
-    pub original_ip_header: Ip6Header,
+pub struct IcmpTimeExceededOrUnreachableHeader {
+    pub header: IcmpHeader,
+    _unused: [u8; 4],
 }
 
-impl Icmp6EchoHeader {
+impl IcmpEchoHeader {
     pub const fn identifier(&self) -> u16 {
         u16::from_be_bytes(self.identifier)
     }
@@ -140,8 +142,8 @@ impl Icmp6EchoHeader {
 
     pub const fn echo_request(identifier: u16, sequence: u16) -> Self {
         Self {
-            header: Icmp6Header {
-                icmp_type: Icmp6Type::EchoRequest,
+            header: IcmpHeader {
+                icmp_type: IcmpType::EchoRequest,
                 code: 0,
                 checksum: [0, 0],
             },
@@ -153,32 +155,29 @@ impl Icmp6EchoHeader {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Response<'data> {
-    Echo(&'data Icmp6EchoHeader),
-    DestinationUnreachable(&'data Icmp6TimeExceededOrUnreachableHeader),
-    TimeExceeded(&'data Icmp6TimeExceededOrUnreachableHeader),
+    Echo(&'data IcmpEchoHeader),
+    DestinationUnreachable(&'data IcmpTimeExceededOrUnreachableHeader),
+    TimeExceeded(&'data IcmpTimeExceededOrUnreachableHeader),
 }
 
 pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
     // Note that `socket2` strips away the IPv6 header (but doesn't strip away the IPv4 header). Why??
-    let (icmp_header, _) = Icmp6Header::try_ref_from_prefix(packet)
-        .map_err(|e| Error::ParseError("Icmp6Header", e.to_string()))?;
+    let (icmp_header, _) = IcmpHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
     match icmp_header.icmp_type {
-        Icmp6Type::EchoReply => {
-            let (echo, rest) = Icmp6EchoHeader::try_ref_from_prefix(packet)
-                .map_err(|e| Error::ParseError("Icmp6Echo", e.to_string()))?;
+        IcmpType::EchoReply => {
+            let (echo, rest) =
+                IcmpEchoHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
             Ok((Response::Echo(echo), rest))
         }
-        Icmp6Type::EchoRequest => Err(Error::UnexpectedEchoRequest),
-        Icmp6Type::DestinationUnreachable => {
-            let (error, rest) =
-                Icmp6TimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
-                    .map_err(|e| Error::ParseError("Icmp6DestinationUnreachable", e.to_string()))?;
+        IcmpType::EchoRequest => Err(Error::UnexpectedEchoRequest),
+        IcmpType::DestinationUnreachable => {
+            let (error, rest) = IcmpTimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
+                .map_err(convert_error)?;
             Ok((Response::DestinationUnreachable(error), rest))
         }
-        Icmp6Type::TimeExceeded => {
-            let (error, rest) =
-                Icmp6TimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
-                    .map_err(|e| Error::ParseError("Icmp6TimeExceeded", e.to_string()))?;
+        IcmpType::TimeExceeded => {
+            let (error, rest) = IcmpTimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
+                .map_err(convert_error)?;
             Ok((Response::TimeExceeded(error), rest))
         }
     }

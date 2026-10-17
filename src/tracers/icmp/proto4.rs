@@ -6,24 +6,11 @@
 //! header does not include the `IPv[46]` header. This is because `socket2`'s API
 //! will create its own L3 header.
 
+use super::common::{Error, convert_error};
 use std::net::Ipv4Addr;
 use zerocopy::{IntoBytes, TryFromBytes};
 
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum Error {
-    #[error("Not an IPv4 packet")]
-    NotIp4,
-    #[error("Bad IPv4 IHL: {0}")]
-    BadIp4Ihl(u8),
-    #[error("IHL jumps past the end of the packet")]
-    PacketTooShort,
-    #[error("ICMP checksum mismatch")]
-    BadIcmpChecksum,
-    #[error("Unexpected ICMP echo request")]
-    UnexpectedEchoRequest,
-    #[error("Parsing error at {0}: {1}")]
-    ParseError(&'static str, String),
-}
+pub const ICMP_PROTO_NUMBER: u8 = 1;
 
 // The Internet Checksum (RFC 1071)
 fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
@@ -72,7 +59,7 @@ fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
 )]
 #[repr(u8)]
 #[allow(dead_code)]
-pub enum Icmp4Type {
+pub enum IcmpType {
     EchoReply = 0,
     DestinationUnreachable = 3,
     EchoRequest = 8,
@@ -82,6 +69,7 @@ pub enum Icmp4Type {
 #[derive(
     Debug,
     Clone,
+    Copy,
     PartialEq,
     Eq,
     zerocopy_derive::TryFromBytes,
@@ -90,7 +78,7 @@ pub enum Icmp4Type {
     zerocopy_derive::KnownLayout,
 )]
 #[repr(C)]
-pub struct Ip4Header {
+pub struct IpHeader {
     pub version_ihl: u8,
     pub dscp_ecn: u8,
     pub total_length: [u8; 2],
@@ -104,7 +92,7 @@ pub struct Ip4Header {
 }
 
 #[allow(dead_code)]
-impl Ip4Header {
+impl IpHeader {
     pub const fn version(&self) -> u8 {
         self.version_ihl >> 4
     }
@@ -135,6 +123,26 @@ impl Ip4Header {
     pub const fn destination_ip(&self) -> Ipv4Addr {
         Ipv4Addr::from_octets(self.destination_ip)
     }
+    pub const fn is_icmp(&self) -> bool {
+        self.protocol == ICMP_PROTO_NUMBER
+    }
+    /// Like `try_ref_from_prefix`, but skips over the IP options if present.
+    ///
+    /// # Returns
+    ///
+    /// (Ip4Header, payload) if successful, or whatever error encountered.
+    pub fn try_parse_ref_skip_option(packet: &[u8]) -> Result<(Self, &[u8]), Error> {
+        let (header, _) = Self::try_ref_from_prefix(packet).map_err(convert_error)?;
+        if header.ihl() < 5 {
+            return Err(Error::BadIp4Ihl(header.ihl()));
+        }
+        let options_length = usize::from(header.ihl()) * 4;
+        let packet = packet.get(options_length..).ok_or(Error::PacketTooShort)?;
+        if header.version() != 4 {
+            return Err(Error::NotIp4);
+        }
+        Ok((*header, packet))
+    }
 }
 
 #[derive(
@@ -148,8 +156,8 @@ impl Ip4Header {
     zerocopy_derive::KnownLayout,
 )]
 #[repr(C)]
-pub struct Icmp4Header {
-    pub icmp_type: Icmp4Type,
+pub struct IcmpHeader {
+    pub icmp_type: IcmpType,
     pub code: u8,
     pub checksum: [u8; 2],
 }
@@ -165,13 +173,13 @@ pub struct Icmp4Header {
     zerocopy_derive::KnownLayout,
 )]
 #[repr(C)]
-pub struct Icmp4EchoHeader {
-    pub header: Icmp4Header,
+pub struct IcmpEchoHeader {
+    pub header: IcmpHeader,
     pub identifier: [u8; 2],
     pub sequence: [u8; 2],
 }
 
-impl Icmp4EchoHeader {
+impl IcmpEchoHeader {
     pub const fn identifier(&self) -> u16 {
         u16::from_be_bytes(self.identifier)
     }
@@ -191,17 +199,16 @@ impl Icmp4EchoHeader {
     zerocopy_derive::KnownLayout,
 )]
 #[repr(C)]
-pub struct Icmp4TimeExceededOrUnreachableHeaderAndNextHeader {
-    pub header: Icmp4Header,
-    pub unused: u32,
-    pub original_ip_header: Ip4Header,
+pub struct IcmpTimeExceededOrUnreachableHeaderAndNextHeader {
+    pub header: IcmpHeader,
+    _unused: u32,
 }
 
-impl Icmp4EchoHeader {
+impl IcmpEchoHeader {
     pub fn echo_request(identifier: u16, sequence: u16) -> Self {
         let mut header = Self {
-            header: Icmp4Header {
-                icmp_type: Icmp4Type::EchoRequest,
+            header: IcmpHeader {
+                icmp_type: IcmpType::EchoRequest,
                 code: 0,
                 checksum: [0, 0],
             },
@@ -216,64 +223,42 @@ impl Icmp4EchoHeader {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Response<'data> {
-    Echo(&'data Icmp4EchoHeader),
-    TimeExceeded(&'data Icmp4TimeExceededOrUnreachableHeaderAndNextHeader),
-    DestinationUnreachable(&'data Icmp4TimeExceededOrUnreachableHeaderAndNextHeader),
-    WhateverNotIcmp(u8),
+    Echo(&'data IcmpEchoHeader),
+    TimeExceeded(&'data IcmpTimeExceededOrUnreachableHeaderAndNextHeader),
+    DestinationUnreachable(&'data IcmpTimeExceededOrUnreachableHeaderAndNextHeader),
+    IpProtoNotIcmp(u8),
 }
 
 pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
-    let (ip_header, packet) = Ip4Header::try_ref_from_prefix(packet)
-        .map_err(|e| Error::ParseError("Ip4Header", e.to_string()))?;
-    if ip_header.version() != 4 {
-        return Err(Error::NotIp4);
+    let (ip_header, packet) = IpHeader::try_parse_ref_skip_option(packet)?;
+    if ip_header.protocol != ICMP_PROTO_NUMBER {
+        return Ok((Response::IpProtoNotIcmp(ip_header.protocol), packet));
     }
-    if ip_header.protocol != 1 {
-        return Ok((Response::WhateverNotIcmp(ip_header.protocol), packet));
-    }
-    if ip_header.ihl() < 5 {
-        return Err(Error::BadIp4Ihl(ip_header.ihl()));
-    }
-    let options_length = (usize::from(ip_header.ihl()) - 5) * 4;
-    let packet = packet
-        .get(options_length..)
-        .ok_or(Error::PacketTooShort)?;
     // Note that the Icmp type headers expect the ICMP header to still be present,
     // so subsequent steps use `packet` instead of what is given here.
-    let (icmp_header, remaining) = Icmp4Header::try_ref_from_prefix(packet)
-        .map_err(|e| Error::ParseError("Icmp4Header", e.to_string()))?;
+    let (icmp_header, remaining) =
+        IcmpHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
     match icmp_header.icmp_type {
-        Icmp4Type::EchoReply => {
+        IcmpType::EchoReply => {
             if checksum(icmp_header.as_bytes(), remaining) != 0 {
                 return Err(Error::BadIcmpChecksum);
             }
-            let (eh, rest) = Icmp4EchoHeader::try_ref_from_prefix(packet)
-                .map_err(|e| Error::ParseError("Icmp4EchoHeader", e.to_string()))?;
+            let (eh, rest) = IcmpEchoHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
             Ok((Response::Echo(eh), rest))
         }
-        Icmp4Type::TimeExceeded => {
+        IcmpType::TimeExceeded => {
             let (teh, rest) =
-                Icmp4TimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
-                    .map_err(|e| {
-                        Error::ParseError(
-                            "Icmp4TimeExceededOrUnreachableHeaderAndNextHeader",
-                            e.to_string(),
-                        )
-                    })?;
+                IcmpTimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
+                    .map_err(convert_error)?;
             Ok((Response::TimeExceeded(teh), rest))
         }
-        Icmp4Type::DestinationUnreachable => {
+        IcmpType::DestinationUnreachable => {
             let (duh, rest) =
-                Icmp4TimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
-                    .map_err(|e| {
-                        Error::ParseError(
-                            "Icmp4TimeExceededOrUnreachableHeaderAndNextHeader",
-                            e.to_string(),
-                        )
-                    })?;
+                IcmpTimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
+                    .map_err(convert_error)?;
             Ok((Response::DestinationUnreachable(duh), rest))
         }
-        Icmp4Type::EchoRequest => Err(Error::UnexpectedEchoRequest),
+        IcmpType::EchoRequest => Err(Error::UnexpectedEchoRequest),
     }
 }
 

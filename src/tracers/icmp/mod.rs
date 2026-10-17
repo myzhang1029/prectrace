@@ -1,306 +1,209 @@
+//! ICMPv[46] support stuff.
+//!
+//! Note that, unlike the unfair convention in RFCs or other packages with
+//! historical considerations, where `ICMP` refers to `ICMP4` and `ICMP6`
+//! requires the numeric suffix, in this crate, both versions are treated as
+//! completely equal and not suffixed wherever possible.
+
+mod common;
 mod proto4;
 mod proto6;
 
+use super::ResponseState;
+use core::mem::MaybeUninit;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io;
-use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::unix::AsyncFd;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 use zerocopy::{IntoBytes, TryFromBytes};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hop {
+/// A [`Probe`] represents something that we sent out and are hoping to get a response for.
+/// The response will be represented by a [`Response`] when it arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Probe {
     pub hop: u8,
-    pub address: Option<SocketAddr>,
-    pub round_trip_time: Option<Duration>,
-    pub reached: bool,
+    pub sequence: u16,
+    pub sent_time: Instant,
 }
 
-pub struct Tracer {
-    tokio_socket: AsyncFd<Socket>,
+/// A [`Response`] is constructed for each received packet that matches a [`Probe`] we sent out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Response {
+    pub for_probe: Probe,
+    pub source: SocketAddr,
+    pub received_time: Instant,
+    pub state: ResponseState,
+}
+
+#[derive(Debug, Clone)]
+pub struct IcmpTracer {
+    socket: Arc<AsyncFd<Socket>>,
     target: SocketAddr,
     identifier: u16,
-    sequence: u16,
 }
 
-enum ParsedResponse<'data> {
-    V4(proto4::Response<'data>, &'data [u8]),
-    V6(proto6::Response<'data>, &'data [u8]),
+// See `IcmpTracer::classify` for what this macro is for.
+macro_rules! gen_classify_arms_for_proto {
+    ($proto:ident, $matcher:ident, $self:ident, $probe:ident, $packet:ident) => {{
+        let (icmp_hdr, payload) = $proto::parse($packet).ok()?;
+        match icmp_hdr {
+            $proto::Response::Echo(echo)
+                if (echo.identifier() == $self.identifier
+                    && echo.sequence() == $probe.sequence) =>
+            {
+                Some(ResponseState::Reached)
+            }
+            $proto::Response::TimeExceeded(_) | $proto::Response::DestinationUnreachable(_) => {
+                let (error_embedded_hdr, error_embedded_payload) =
+                    $proto::IpHeader::try_parse_ref_skip_option(payload).ok()?;
+                if !error_embedded_hdr.is_icmp() {
+                    // The error is not for us
+                    return None;
+                }
+                // Embedded packet not under the ICMP codes we care about
+                let Ok((echo, _)) =
+                    $proto::IcmpEchoHeader::try_ref_from_prefix(error_embedded_payload)
+                else {
+                    return None;
+                };
+                if echo.header.icmp_type != $proto::IcmpType::EchoRequest
+                    || echo.identifier() != $self.identifier
+                    || echo.sequence() != $probe.sequence
+                {
+                    return None;
+                }
+                if matches!(icmp_hdr, $proto::Response::TimeExceeded(_)) {
+                    Some(ResponseState::OnTheWay)
+                } else {
+                    // DestinationUnreachable
+                    Some(ResponseState::Unreachable)
+                }
+            }
+            // Either not the ICMP types we expect, or the packet is not in response to `probe`
+            _ => None,
+        }
+    }};
 }
 
-impl Tracer {
+impl IcmpTracer {
+    /// Create a new `IcmpTracer` for the given target IP address.
     pub fn new(target: IpAddr) -> io::Result<Self> {
-        let raw_socket = match target {
-            IpAddr::V4(_) => Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?,
-            IpAddr::V6(_) => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?,
-        };
-        raw_socket.set_nonblocking(true)?;
-
-        Self::new_with_socket(raw_socket, target)
-    }
-
-    // Requires that the socket is already set to non-blocking mode.
-    // We take ownership of the socket to satisfy the requirements of `AsyncFd`,
-    // which requires that the underlying file descriptor remains valid for the
-    // lifetime of the `AsyncFd`.
-    pub fn new_with_socket(socket: Socket, target: IpAddr) -> io::Result<Self> {
-        // SAFETY: the validity of the fd returned by `socket.into_raw_fd()` is guaranteed by
-        // the `Socket` type, the fact that we will hold its ownership, and that we will not close
-        // the fd.
-        let tokio_socket = unsafe { AsyncFd::register(socket)? };
+        let socket = Socket::new(
+            if target.is_ipv4() {
+                Domain::IPV4
+            } else {
+                Domain::IPV6
+            },
+            Type::RAW,
+            Some(if target.is_ipv4() {
+                Protocol::ICMPV4
+            } else {
+                Protocol::ICMPV6
+            }),
+        )?;
+        socket.set_nonblocking(true)?;
+        let socket = unsafe { AsyncFd::register(socket)? };
 
         Ok(Self {
-            tokio_socket,
+            socket: Arc::new(socket),
             target: SocketAddr::new(target, 0),
             identifier: rand::random(),
-            sequence: 0,
         })
     }
 
-    pub fn into_inner(self) -> (Socket, IpAddr) {
-        (self.tokio_socket.into_inner(), self.target.ip())
+    /// Reset the identifier during a trace.
+    pub fn set_identifier(&mut self, identifier: u16) {
+        self.identifier = identifier;
     }
 
-    pub async fn trace(&mut self, max_hops: u8, timeout: Duration) -> io::Result<Vec<Hop>> {
-        let mut hops = Vec::with_capacity(max_hops as usize);
-
-        for hop in 1..=max_hops {
-            let sequence = self.sequence;
-            self.sequence = self.sequence.wrapping_add(1);
-
+    /// Actually send one single probe to the target.
+    ///
+    /// # Arguments
+    ///
+    /// - num_hops: the TTL (IPv4) or Hop Limit (IPv6) to use for this probe
+    /// - sequence: the ICMP(6) echo sequence number to use for this probe
+    ///
+    /// # Returns
+    ///
+    ///
+    #[tracing::instrument(level = "info", skip(self), fields(target = %self.target, identifier = self.identifier))]
+    pub async fn send_probe(&self, num_hops: u8, sequence: u16) -> io::Result<Probe> {
+        // All captured stuff are `Copy` so we make the closure once outside the loop
+        let sender = |sock: &AsyncFd<Socket>| {
+            // Don't create the packet until we know the socket is writable
+            // (I wonder how big this Future is..)
+            let inner = sock.get_ref();
             if self.target.is_ipv4() {
-                self.tokio_socket.get_ref().set_ttl_v4(u32::from(hop))?;
+                let pkt = proto4::IcmpEchoHeader::echo_request(self.identifier, sequence);
+                inner.set_ttl_v4(u32::from(num_hops))?;
+                inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
             } else {
-                self.tokio_socket
-                    .get_ref()
-                    .set_unicast_hops_v6(u32::from(hop))?;
+                let pkt = proto6::IcmpEchoHeader::echo_request(self.identifier, sequence);
+                inner.set_unicast_hops_v6(u32::from(num_hops))?;
+                inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
             }
-            tracing::Span::current().record("hop", &hop);
-            tracing::Span::current().record("sequence", &sequence);
-
-            let started = Instant::now();
-            debug!("sending ICMP echo request to {}", self.target);
-            if self.target.is_ipv4() {
-                let packet = proto4::Icmp4EchoHeader::echo_request(self.identifier, sequence);
-                self.tokio_socket
-                    .get_ref()
-                    .send_to(packet.as_bytes(), &SockAddr::from(self.target))?;
-            } else {
-                let packet = proto6::Icmp6EchoHeader::echo_request(self.identifier, sequence);
-                self.tokio_socket
-                    .get_ref()
-                    .send_to(packet.as_bytes(), &SockAddr::from(self.target))?;
+            Ok(Instant::now())
+        };
+        let sent_time = loop {
+            let mut readiness = self.socket.writable().await?;
+            if let Ok(r) = readiness.try_io(sender) {
+                break r?;
             }
+            // else WouldBlock
+        };
+        debug!("sent probe at {sent_time:?}");
 
-            let response = self.receive_response(sequence, timeout, started).await?;
-            let Some(response) = response else {
-                debug!("Hop {hop} timed out");
-                hops.push(Hop {
-                    hop,
-                    address: None,
-                    round_trip_time: None,
-                    reached: false,
-                });
-                continue;
-            };
-            debug!(
-                "received response from {:?} in {:?}, reached: {}",
-                response.address, response.round_trip_time, response.reached
-            );
-            let reached = response.reached;
-            hops.push(Hop {
-                hop,
-                address: Some(response.address),
-                round_trip_time: Some(response.round_trip_time),
-                reached,
-            });
-
-            if reached {
-                break;
-            }
-        }
-
-        Ok(hops)
+        Ok(Probe {
+            hop: num_hops,
+            sequence,
+            sent_time,
+        })
     }
 
-    async fn receive_response(
-        &self,
-        sequence: u16,
-        timeout: Duration,
-        started: Instant,
-    ) -> io::Result<Option<ReceivedResponse>> {
-        let deadline = started + timeout;
-
+    /// Wait until a packet is received on the socket and return the packet, peer address, and timestamp.
+    pub async fn receive_packet(&self) -> io::Result<(Vec<u8>, SocketAddr, Instant)> {
+        let do_recv_callback = |sock: &AsyncFd<Socket>| {
+            let mut buffer = [const { MaybeUninit::uninit() }; 4096];
+            let (length, source) = sock.get_ref().recv_from(&mut buffer)?;
+            let timestamp = Instant::now();
+            let source = source
+                .as_socket()
+                .expect("raw ICMP socket returned a non-IP address");
+            let bytes = buffer[..length]
+                .iter()
+                .map(|byte| unsafe { byte.assume_init() })
+                .collect::<Vec<u8>>();
+            trace!(length, %source, "received packet: {bytes:02x?}");
+            Ok((bytes, source, timestamp))
+        };
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok(None);
-            }
-
-            let Ok(result) = tokio::time::timeout(remaining, self.receive_packet()).await else {
-                return Ok(None);
-            };
-            let (packet, source) = result?;
-            let parsed = if self.target.is_ipv4() {
-                proto4::parse(&packet)
-                    .map(|(response, payload)| ParsedResponse::V4(response, payload))
-                    .map_err(|error| format!("{error}"))
-            } else {
-                let IpAddr::V6(source_ip) = source.ip() else {
-                    panic!("IPv6 receive path has an IPv4 source address");
-                };
-                let IpAddr::V6(destination_ip) = self.target.ip() else {
-                    panic!("IPv6 receive path has an IPv4 destination address");
-                };
-                proto6::parse(&packet, source_ip, destination_ip)
-                    .map(|(response, payload)| ParsedResponse::V6(response, payload))
-                    .map_err(|error| format!("{error}"))
-            };
-            let parsed = match parsed {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    debug!("Failed to parse ICMP response from {source}: {error}");
-                    continue;
-                }
-            };
-            match parsed {
-                ParsedResponse::V4(response, payload) => match response {
-                    proto4::Response::Echo(echo) => {
-                        if echo.identifier() == self.identifier && echo.sequence() == sequence {
-                            return Ok(Some(ReceivedResponse {
-                                address: source,
-                                round_trip_time: started.elapsed(),
-                                reached: true,
-                            }));
-                        }
-                    }
-                    proto4::Response::TimeExceeded(te) => {
-                        if matches_probe(&te.original_ip_header, payload, self.identifier, sequence)
-                        {
-                            return Ok(Some(ReceivedResponse {
-                                address: source,
-                                round_trip_time: started.elapsed(),
-                                reached: false,
-                            }));
-                        }
-                    }
-                    proto4::Response::DestinationUnreachable(du) => {
-                        if matches_probe(&du.original_ip_header, payload, self.identifier, sequence)
-                        {
-                            return Ok(Some(ReceivedResponse {
-                                address: source,
-                                round_trip_time: started.elapsed(),
-                                reached: false,
-                            }));
-                        }
-                    }
-                    proto4::Response::WhateverNotIcmp(_) => {
-                        debug!("received non-ICMP packet from {source}");
-                    }
-                },
-                ParsedResponse::V6(response, payload) => match response {
-                    proto6::Response::Echo(echo) => {
-                        if echo.identifier() == self.identifier && echo.sequence() == sequence {
-                            return Ok(Some(ReceivedResponse {
-                                address: source,
-                                round_trip_time: started.elapsed(),
-                                reached: true,
-                            }));
-                        }
-                    }
-                    proto6::Response::TimeExceeded(te)
-                    | proto6::Response::DestinationUnreachable(te) => {
-                        if matches_probe_v6(
-                            &te.original_ip_header,
-                            payload,
-                            self.identifier,
-                            sequence,
-                        ) {
-                            return Ok(Some(ReceivedResponse {
-                                address: source,
-                                round_trip_time: started.elapsed(),
-                                reached: false,
-                            }));
-                        }
-                    }
-                },
-            }
-        }
-    }
-
-    async fn receive_packet(&self) -> io::Result<(Vec<u8>, SocketAddr)> {
-        loop {
-            let mut readiness = self.tokio_socket.readable().await?;
+            let mut readiness = self.socket.readable().await?;
             if let Ok(packet) = readiness.try_io(do_recv_callback) {
                 return packet;
             }
-            // else: WouldBlock
         }
     }
-}
 
-fn matches_probe(
-    original_ip_header: &proto4::Ip4Header,
-    payload: &[u8],
-    identifier: u16,
-    sequence: u16,
-) -> bool {
-    if original_ip_header.protocol != 1 || original_ip_header.ihl() < 5 {
-        return false;
+    pub fn classify(
+        &self,
+        probe: Probe,
+        packet: &[u8],
+        source: SocketAddr,
+        received_time: Instant,
+    ) -> Option<Response> {
+        let state = if self.target.is_ipv4() {
+            gen_classify_arms_for_proto!(proto4, matches_probe_v4, self, probe, packet)
+        } else {
+            gen_classify_arms_for_proto!(proto6, matches_probe_v6, self, probe, packet)
+        }?;
+        Some(Response {
+            for_probe: probe,
+            source,
+            received_time,
+            state,
+        })
     }
-
-    let options_length = (usize::from(original_ip_header.ihl()) - 5) * 4;
-    let Ok((echo, _)) = proto4::Icmp4EchoHeader::try_ref_from_prefix(
-        payload.get(options_length..).unwrap_or_default(),
-    ) else {
-        return false;
-    };
-
-    echo.header.icmp_type == proto4::Icmp4Type::EchoRequest
-        && echo.identifier() == identifier
-        && echo.sequence() == sequence
-}
-
-fn matches_probe_v6(
-    original_ip_header: &proto6::Ip6Header,
-    payload: &[u8],
-    identifier: u16,
-    sequence: u16,
-) -> bool {
-    if original_ip_header.next_header != proto6::ICMP6_NH_NUMBER {
-        return false;
-    }
-
-    let Ok((echo, _)) = proto6::Icmp6EchoHeader::try_ref_from_prefix(payload) else {
-        return false;
-    };
-
-    echo.header.icmp_type == proto6::Icmp6Type::EchoRequest
-        && echo.identifier() == identifier
-        && echo.sequence() == sequence
-}
-
-#[tracing::instrument(level = "debug", skip_all)]
-#[inline]
-fn do_recv_callback(inner: &AsyncFd<Socket>) -> Result<(Vec<u8>, SocketAddr), io::Error> {
-    let mut buffer = [MaybeUninit::<u8>::uninit(); 4096];
-    let (length, source) = inner.get_ref().recv_from(&mut buffer)?;
-    let source = source
-        .as_socket()
-        .expect("This `SockAddr` should be always a `SocketAddr` (this is a bug!)");
-    // SAFETY: these `length` bytes are initialized by `recv_from`.
-    let bytes = buffer[..length]
-        .iter()
-        .map(|b| unsafe { b.assume_init() })
-        .collect::<Vec<u8>>();
-    trace!("received {length} bytes from {source}: {bytes:02x?}");
-    Ok((bytes, source))
-}
-
-pub struct ReceivedResponse {
-    pub address: SocketAddr,
-    pub round_trip_time: Duration,
-    pub reached: bool,
 }
