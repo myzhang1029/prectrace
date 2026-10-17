@@ -3,7 +3,7 @@
 //! Implementation notes:
 //! Every layer of the protocol stack is represented by a Header struct,
 //! and subsequent layers includes the previous layer's header except that the L4
-//! header does not include the IPv[46] header. This is because `socket2`'s API
+//! header does not include the `IPv[46]` header. This is because `socket2`'s API
 //! will create its own L3 header.
 
 use std::net::Ipv4Addr;
@@ -30,23 +30,23 @@ fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
     let (chunks, remainder) = packet.as_chunks::<2>();
     let mut sum: u32 = chunks
         .iter()
-        .map(|chunk| u16::from_be_bytes(*chunk) as u32)
+        .map(|chunk| u32::from(u16::from_be_bytes(*chunk)))
         .sum();
     if !remainder.is_empty() {
-        let rh = remainder[0] as u32;
+        let rh = u32::from(remainder[0]);
         sum += rh << 8;
         if !additional_data.is_empty() {
-            sum += additional_data[0] as u32;
+            sum += u32::from(additional_data[0]);
             additional_data = &additional_data[1..];
         }
     }
     let (chunks, remainder) = additional_data.as_chunks::<2>();
     sum += chunks
         .iter()
-        .map(|chunk| u16::from_be_bytes(*chunk) as u32)
+        .map(|chunk| u32::from(u16::from_be_bytes(*chunk)))
         .sum::<u32>();
     if !remainder.is_empty() {
-        let rh = remainder[0] as u32;
+        let rh = u32::from(remainder[0]);
         sum += rh << 8;
     }
     while (sum >> 16) != 0 {
@@ -222,7 +222,7 @@ pub enum Response<'data> {
     WhateverNotIcmp(u8),
 }
 
-pub fn parse<'data>(packet: &'data [u8]) -> Result<(Response<'data>, &'data [u8]), Error> {
+pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
     let (ip_header, packet) = Ip4Header::try_ref_from_prefix(packet)
         .map_err(|e| Error::ParseError("Ip4Header", e.to_string()))?;
     if ip_header.version() != 4 {
@@ -237,7 +237,7 @@ pub fn parse<'data>(packet: &'data [u8]) -> Result<(Response<'data>, &'data [u8]
     let options_length = (usize::from(ip_header.ihl()) - 5) * 4;
     let packet = packet
         .get(options_length..)
-        .ok_or_else(|| Error::PacketTooShort)?;
+        .ok_or(Error::PacketTooShort)?;
     // Note that the Icmp type headers expect the ICMP header to still be present,
     // so subsequent steps use `packet` instead of what is given here.
     let (icmp_header, remaining) = Icmp4Header::try_ref_from_prefix(packet)

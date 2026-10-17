@@ -158,11 +158,7 @@ pub enum Response<'data> {
     TimeExceeded(&'data Icmp6TimeExceededOrUnreachableHeader),
 }
 
-pub fn parse<'data>(
-    packet: &'data [u8],
-    source: Ipv6Addr,
-    destination: Ipv6Addr,
-) -> Result<(Response<'data>, &'data [u8]), Error> {
+pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
     // Note that `socket2` strips away the IPv6 header (but doesn't strip away the IPv4 header). Why??
     let (icmp_header, _) = Icmp6Header::try_ref_from_prefix(packet)
         .map_err(|e| Error::ParseError("Icmp6Header", e.to_string()))?;
