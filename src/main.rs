@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::from_default_env())
         .try_init()
         .ok();
-    let target = "44.30.70.3".parse::<IpAddr>().unwrap();
+    let target = "fdc0:d227:306:2c01:0:5d2:2:ad10".parse::<IpAddr>().unwrap();
     let mut tracer = tracers::icmp::Tracer::new(target)?;
     let results = tracer.trace(30, std::time::Duration::from_secs(4)).await?;
     println!("Results: {results:?}");

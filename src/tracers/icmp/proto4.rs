@@ -215,21 +215,21 @@ impl Icmp4EchoHeader {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Response4<'data> {
+pub enum Response<'data> {
     Echo(&'data Icmp4EchoHeader),
     TimeExceeded(&'data Icmp4TimeExceededOrUnreachableHeaderAndNextHeader),
     DestinationUnreachable(&'data Icmp4TimeExceededOrUnreachableHeaderAndNextHeader),
     WhateverNotIcmp(u8),
 }
 
-pub fn parse_v4<'data>(packet: &'data [u8]) -> Result<(Response4<'data>, &'data [u8]), Error> {
+pub fn parse<'data>(packet: &'data [u8]) -> Result<(Response<'data>, &'data [u8]), Error> {
     let (ip_header, packet) = Ip4Header::try_ref_from_prefix(packet)
         .map_err(|e| Error::ParseError("Ip4Header", e.to_string()))?;
     if ip_header.version() != 4 {
         return Err(Error::NotIp4);
     }
     if ip_header.protocol != 1 {
-        return Ok((Response4::WhateverNotIcmp(ip_header.protocol), packet));
+        return Ok((Response::WhateverNotIcmp(ip_header.protocol), packet));
     }
     if ip_header.ihl() < 5 {
         return Err(Error::BadIp4Ihl(ip_header.ihl()));
@@ -249,7 +249,7 @@ pub fn parse_v4<'data>(packet: &'data [u8]) -> Result<(Response4<'data>, &'data 
             }
             let (eh, rest) = Icmp4EchoHeader::try_ref_from_prefix(packet)
                 .map_err(|e| Error::ParseError("Icmp4EchoHeader", e.to_string()))?;
-            Ok((Response4::Echo(eh), rest))
+            Ok((Response::Echo(eh), rest))
         }
         Icmp4Type::TimeExceeded => {
             let (teh, rest) =
@@ -260,7 +260,7 @@ pub fn parse_v4<'data>(packet: &'data [u8]) -> Result<(Response4<'data>, &'data 
                             e.to_string(),
                         )
                     })?;
-            Ok((Response4::TimeExceeded(teh), rest))
+            Ok((Response::TimeExceeded(teh), rest))
         }
         Icmp4Type::DestinationUnreachable => {
             let (duh, rest) =
@@ -271,11 +271,12 @@ pub fn parse_v4<'data>(packet: &'data [u8]) -> Result<(Response4<'data>, &'data 
                             e.to_string(),
                         )
                     })?;
-            Ok((Response4::DestinationUnreachable(duh), rest))
+            Ok((Response::DestinationUnreachable(duh), rest))
         }
         Icmp4Type::EchoRequest => Err(Error::UnexpectedEchoRequest),
     }
 }
+
 mod tests {
     #[test]
     fn test_checksum() {

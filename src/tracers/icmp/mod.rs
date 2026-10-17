@@ -1,4 +1,5 @@
-mod proto;
+mod proto4;
+mod proto6;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io;
@@ -7,10 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::io::unix::AsyncFd;
 use tracing::{debug, trace, warn};
-use zerocopy::IntoBytes;
-
-use crate::tracers::icmp::proto::{Icmp4EchoHeader, Response4};
-use zerocopy::TryFromBytes;
+use zerocopy::{IntoBytes, TryFromBytes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hop {
@@ -25,6 +23,11 @@ pub struct Tracer {
     target: SocketAddr,
     identifier: u16,
     sequence: u16,
+}
+
+enum ParsedResponse<'data> {
+    V4(proto4::Response<'data>, &'data [u8]),
+    V6(proto6::Response<'data>, &'data [u8]),
 }
 
 impl Tracer {
@@ -77,12 +80,19 @@ impl Tracer {
             tracing::Span::current().record("hop", &hop);
             tracing::Span::current().record("sequence", &sequence);
 
-            let packet = proto::Icmp4EchoHeader::echo_request(self.identifier, sequence);
             let started = Instant::now();
             debug!("sending ICMP echo request to {}", self.target);
-            self.tokio_socket
-                .get_ref()
-                .send_to(packet.as_bytes(), &SockAddr::from(self.target))?;
+            if self.target.is_ipv4() {
+                let packet = proto4::Icmp4EchoHeader::echo_request(self.identifier, sequence);
+                self.tokio_socket
+                    .get_ref()
+                    .send_to(packet.as_bytes(), &SockAddr::from(self.target))?;
+            } else {
+                let packet = proto6::Icmp6EchoHeader::echo_request(self.identifier, sequence);
+                self.tokio_socket
+                    .get_ref()
+                    .send_to(packet.as_bytes(), &SockAddr::from(self.target))?;
+            }
 
             let response = self.receive_response(sequence, timeout, started).await?;
             let Some(response) = response else {
@@ -129,53 +139,93 @@ impl Tracer {
                 return Ok(None);
             }
 
-            let Ok(r) = tokio::time::timeout(remaining, self.receive_packet()).await else {
-                // Timed out
+            let Ok(result) = tokio::time::timeout(remaining, self.receive_packet()).await else {
                 return Ok(None);
             };
-            let (packet, source) = r?;
-            let (response, payload) = match proto::parse_v4(&packet) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("Failed to parse ICMP response from {source}: {e}");
+            let (packet, source) = result?;
+            let parsed = if self.target.is_ipv4() {
+                proto4::parse(&packet)
+                    .map(|(response, payload)| ParsedResponse::V4(response, payload))
+                    .map_err(|error| format!("{error}"))
+            } else {
+                let IpAddr::V6(source_ip) = source.ip() else {
+                    panic!("IPv6 receive path has an IPv4 source address");
+                };
+                let IpAddr::V6(destination_ip) = self.target.ip() else {
+                    panic!("IPv6 receive path has an IPv4 destination address");
+                };
+                proto6::parse(&packet, source_ip, destination_ip)
+                    .map(|(response, payload)| ParsedResponse::V6(response, payload))
+                    .map_err(|error| format!("{error}"))
+            };
+            let parsed = match parsed {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    debug!("Failed to parse ICMP response from {source}: {error}");
                     continue;
                 }
             };
-            match response {
-                Response4::Echo(echo) => {
-                    if echo.identifier() == self.identifier && echo.sequence() == sequence {
-                        return Ok(Some(ReceivedResponse {
-                            address: source,
-                            round_trip_time: started.elapsed(),
-                            reached: true,
-                        }));
-                    } else {
-                        debug!(
-                            "received echo reply from {source} with mismatched identifier/sequence: {echo:?}"
-                        );
+            match parsed {
+                ParsedResponse::V4(response, payload) => match response {
+                    proto4::Response::Echo(echo) => {
+                        if echo.identifier() == self.identifier && echo.sequence() == sequence {
+                            return Ok(Some(ReceivedResponse {
+                                address: source,
+                                round_trip_time: started.elapsed(),
+                                reached: true,
+                            }));
+                        }
                     }
-                }
-                Response4::TimeExceeded(te) => {
-                    if matches_probe(&te.original_ip_header, payload, self.identifier, sequence) {
-                        return Ok(Some(ReceivedResponse {
-                            address: source,
-                            round_trip_time: started.elapsed(),
-                            reached: false,
-                        }));
+                    proto4::Response::TimeExceeded(te) => {
+                        if matches_probe(&te.original_ip_header, payload, self.identifier, sequence)
+                        {
+                            return Ok(Some(ReceivedResponse {
+                                address: source,
+                                round_trip_time: started.elapsed(),
+                                reached: false,
+                            }));
+                        }
                     }
-                }
-                Response4::DestinationUnreachable(du) => {
-                    if matches_probe(&du.original_ip_header, payload, self.identifier, sequence) {
-                        return Ok(Some(ReceivedResponse {
-                            address: source,
-                            round_trip_time: started.elapsed(),
-                            reached: false,
-                        }));
+                    proto4::Response::DestinationUnreachable(du) => {
+                        if matches_probe(&du.original_ip_header, payload, self.identifier, sequence)
+                        {
+                            return Ok(Some(ReceivedResponse {
+                                address: source,
+                                round_trip_time: started.elapsed(),
+                                reached: false,
+                            }));
+                        }
                     }
-                }
-                Response4::WhateverNotIcmp(_) => {
-                    debug!("received non-ICMP packet from {source}");
-                }
+                    proto4::Response::WhateverNotIcmp(_) => {
+                        debug!("received non-ICMP packet from {source}");
+                    }
+                },
+                ParsedResponse::V6(response, payload) => match response {
+                    proto6::Response::Echo(echo) => {
+                        if echo.identifier() == self.identifier && echo.sequence() == sequence {
+                            return Ok(Some(ReceivedResponse {
+                                address: source,
+                                round_trip_time: started.elapsed(),
+                                reached: true,
+                            }));
+                        }
+                    }
+                    proto6::Response::TimeExceeded(te)
+                    | proto6::Response::DestinationUnreachable(te) => {
+                        if matches_probe_v6(
+                            &te.original_ip_header,
+                            payload,
+                            self.identifier,
+                            sequence,
+                        ) {
+                            return Ok(Some(ReceivedResponse {
+                                address: source,
+                                round_trip_time: started.elapsed(),
+                                reached: false,
+                            }));
+                        }
+                    }
+                },
             }
         }
     }
@@ -192,7 +242,7 @@ impl Tracer {
 }
 
 fn matches_probe(
-    original_ip_header: &proto::Ip4Header,
+    original_ip_header: &proto4::Ip4Header,
     payload: &[u8],
     identifier: u16,
     sequence: u16,
@@ -202,13 +252,32 @@ fn matches_probe(
     }
 
     let options_length = (usize::from(original_ip_header.ihl()) - 5) * 4;
-    let Ok((echo, _)) =
-        Icmp4EchoHeader::try_ref_from_prefix(payload.get(options_length..).unwrap_or_default())
-    else {
+    let Ok((echo, _)) = proto4::Icmp4EchoHeader::try_ref_from_prefix(
+        payload.get(options_length..).unwrap_or_default(),
+    ) else {
         return false;
     };
 
-    echo.header.icmp_type == proto::Icmp4Type::EchoRequest
+    echo.header.icmp_type == proto4::Icmp4Type::EchoRequest
+        && echo.identifier() == identifier
+        && echo.sequence() == sequence
+}
+
+fn matches_probe_v6(
+    original_ip_header: &proto6::Ip6Header,
+    payload: &[u8],
+    identifier: u16,
+    sequence: u16,
+) -> bool {
+    if original_ip_header.next_header != proto6::ICMP6_NH_NUMBER {
+        return false;
+    }
+
+    let Ok((echo, _)) = proto6::Icmp6EchoHeader::try_ref_from_prefix(payload) else {
+        return false;
+    };
+
+    echo.header.icmp_type == proto6::Icmp6Type::EchoRequest
         && echo.identifier() == identifier
         && echo.sequence() == sequence
 }
