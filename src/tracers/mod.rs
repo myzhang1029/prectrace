@@ -87,6 +87,13 @@ impl<P: Probe, A> std::fmt::Display for Response<P, A> {
 
 /// A [`Probe`] represents something that we sent out and are hoping to get a response for.
 /// The response will be represented by a [`Response`] when it arrives.
+///
+/// A [`Probe`] is typically created by [`Tracer::send_probe`].
+///
+/// # Implementation
+///
+/// A typical implementation records some form of the `id` value passed by [`Tracer::send_probe`],
+/// so that [`Tracer::match_probe_to_response`] can identify the correct response.
 pub trait Probe: Clone + Send {
     fn get_sent_time(&self) -> Instant;
     fn get_num_hops(&self) -> u8;
@@ -113,14 +120,25 @@ pub trait Tracer: Send + Sync + 'static {
     /// Additional information that this tracer can provide
     type AdditionalInfo: Send;
 
-    /// Send a probe to the network and return the probe that got sent.
+    /// Send a probe to the target through the network.
+    ///
+    /// The function should return the [`Probe`] instance that got sent.
+    ///
+    /// # Arguments
+    ///
+    /// - `num_hops`: the TTL (IPv4) or Hop Limit (IPv6) to use for this probe
+    /// - `id`: an opaque 32-bit identified for the probe. Successive probes MUST
+    ///   have distinct `id` values. The current [`Traceroute`] implementation passes
+    ///   a counter with random initial upper 16 bits.
     fn send_probe(
         &self,
         num_hops: u8,
-        sequence: u16,
+        id: u32,
     ) -> impl Future<Output = io::Result<Self::Probe>> + Send;
 
     /// Listen for a packet on the network, possibly unrelated to any sent probes.
+    ///
+    /// # Implementation
     ///
     /// This function MAY return all packets it sees. Actually matching packets to probes
     /// is the job of `match_probe_to_response`.
@@ -149,7 +167,7 @@ trait TracerExt: Tracer {
         active_hops: Arc<AtomicU8>,
         probe_tx: mpsc::Sender<Self::Probe>,
     ) -> io::Result<()> {
-        let mut sequence = 0u16;
+        let mut id = 0xffff0000 & rand::random::<u32>();
         let mut last_send: Option<Instant> = None;
 
         loop {
@@ -163,13 +181,13 @@ trait TracerExt: Tracer {
                     }
                 }
 
-                let probe = self.send_probe(hop, sequence).await?;
+                let probe = self.send_probe(hop, id).await?;
                 last_send = Some(probe.get_sent_time());
                 probe_tx
                     .send(probe)
                     .await
                     .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "receiver stopped"))?;
-                sequence = sequence.wrapping_add(1);
+                id = id.wrapping_add(1);
                 hop += 1;
 
                 if hop > active_hops.load(Ordering::Relaxed) {

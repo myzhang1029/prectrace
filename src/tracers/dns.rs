@@ -50,8 +50,10 @@ impl tracers::Tracer for DnsTracer {
     type ReceivedPacket = ReceivedPacket;
     type AdditionalInfo = Message;
 
-    async fn send_probe(&self, num_hops: u8, sequence: u16) -> io::Result<Self::Probe> {
-        self.send_probe(num_hops, sequence).await
+    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
+        let id = u16::try_from((id >> 24) | (id & 0xff))
+            .expect("u16 conversion failed (this is a bug!)");
+        self.send_probe(num_hops, id).await
     }
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
@@ -86,8 +88,7 @@ impl DnsTracer {
         })
     }
 
-    async fn send_probe(&self, num_hops: u8, sequence: u16) -> io::Result<Probe> {
-        let id = sequence;
+    async fn send_probe(&self, num_hops: u8, id: u16) -> io::Result<Probe> {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
         message.add_query(self.query.clone());
 
