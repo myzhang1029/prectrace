@@ -3,11 +3,17 @@
 // This work is conducted at Carnegie Mellon University
 // SPDX-License-Identifier: Apache-2.0
 
+mod args;
+
+use anyhow::Context;
+use clap::Parser;
 use prectrace_lib::tracers::{self, TraceConfig};
-use std::net::SocketAddr;
-use std::str::FromStr;
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr};
+use tokio::task::JoinSet;
+use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::args::{Cli, TraceSpec};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,24 +22,139 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::from_default_env())
         .try_init()
         .ok();
-    //let target = "fdc0:d227:306:2c01:0:5d2:2:ad10".parse::<IpAddr>()?;
-    //let target = "8.8.4.4".parse::<IpAddr>()?;
-    //let target = "[fd42:23eb:6cf::161]:123".parse::<SocketAddr>()?;
-    let target = "44.30.70.1:123".parse::<SocketAddr>()?;
-    let mut query = hickory_proto::op::Query::new();
-    query
-        .set_name(hickory_proto::rr::Name::from_str("example.com.")?)
-        .set_query_type(hickory_proto::rr::RecordType::AAAA);
-    let tc = TraceConfig {
-        cycle_interval: Duration::from_secs(1),
-        min_send_spacing: Duration::from_millis(100),
-        timeout: Duration::from_secs(4),
-        max_hops: 30,
-    };
-    //let tracer = tracers::icmp::IcmpTracer::new(target)?;
-    //let tracer = tracers::dns::DnsTracer::new(target, query).await?;
-    let tracer = tracers::sntp::SntpTracer::new(target).await?;
 
-    tracers::Traceroute::new(tracer, tc).run().await?;
+    let cli = Cli::parse();
+
+    let mut traces = Vec::new();
+
+    for spec in cli.icmp {
+        let target = resolve_destination(&spec.destination, 0, cli.ipv4, cli.ipv6).await?;
+        let tracer = tracers::icmp::IcmpTracer::new(target.ip())?;
+        traces.push(PreparedTrace::Icmp {
+            tracer,
+            config: trace_config(&spec, cli.timeout, cli.max_hops),
+        });
+    }
+
+    for spec in cli.dns {
+        let target = resolve_destination(&spec.destination, 53, cli.ipv4, cli.ipv6).await?;
+        let tracer = tracers::dns::DnsTracer::new(target, cli.dns_query.clone()).await?;
+        traces.push(PreparedTrace::Dns {
+            tracer,
+            config: trace_config(&spec, cli.timeout, cli.max_hops),
+        });
+    }
+
+    for spec in cli.sntp {
+        let target = resolve_destination(&spec.destination, 123, cli.ipv4, cli.ipv6).await?;
+        let tracer = tracers::sntp::SntpTracer::new(target).await?;
+        traces.push(PreparedTrace::Sntp {
+            tracer,
+            config: trace_config(&spec, cli.timeout, cli.max_hops),
+        });
+    }
+
+    if traces.is_empty() {
+        anyhow::bail!("at least one trace must be specified");
+    }
+
+    let mut tasks = JoinSet::new();
+    for trace in traces {
+        tasks.spawn(async move {
+            match trace {
+                PreparedTrace::Icmp { tracer, config } => {
+                    tracers::Traceroute::new(tracer, config).run().await?;
+                }
+                PreparedTrace::Dns { tracer, config } => {
+                    tracers::Traceroute::new(tracer, config).run().await?;
+                }
+                PreparedTrace::Sntp { tracer, config } => {
+                    tracers::Traceroute::new(tracer, config).run().await?;
+                }
+            }
+            Ok::<(), std::io::Error>(())
+        });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        result.context("trace task failed")??;
+    }
     Ok(())
+}
+
+enum PreparedTrace {
+    Icmp {
+        tracer: tracers::icmp::IcmpTracer,
+        config: TraceConfig,
+    },
+    Dns {
+        tracer: tracers::dns::DnsTracer,
+        config: TraceConfig,
+    },
+    Sntp {
+        tracer: tracers::sntp::SntpTracer,
+        config: TraceConfig,
+    },
+}
+
+const fn trace_config(spec: &TraceSpec, timeout: std::time::Duration, max_hops: u8) -> TraceConfig {
+    TraceConfig {
+        cycle_interval: spec.interval,
+        min_send_spacing: spec.spacing,
+        timeout,
+        max_hops,
+    }
+}
+
+fn validate_address_family(address: IpAddr, ipv4: bool, ipv6: bool) -> anyhow::Result<()> {
+    if (ipv4 && address.is_ipv6()) || (ipv6 && address.is_ipv4()) {
+        anyhow::bail!("destination {address} does not match the requested IP family");
+    }
+    Ok(())
+}
+
+async fn resolve_destination(
+    destination: &str,
+    default_port: u16,
+    ipv4: bool,
+    ipv6: bool,
+) -> anyhow::Result<SocketAddr> {
+    if let Ok(address) = destination.parse::<SocketAddr>() {
+        validate_address_family(address.ip(), ipv4, ipv6)?;
+        return Ok(address);
+    }
+    if let Ok(address) = destination.parse::<IpAddr>() {
+        validate_address_family(address, ipv4, ipv6)?;
+        return Ok((address, default_port).into());
+    }
+
+    let mut result = tokio::net::lookup_host(destination)
+        .await
+        .map(std::iter::Iterator::collect::<Vec<SocketAddr>>);
+    if result.is_err() {
+        result = tokio::net::lookup_host((destination, default_port))
+            .await
+            .map(std::iter::Iterator::collect::<Vec<SocketAddr>>);
+    }
+    let mut counter = 0;
+    let address = result
+        .with_context(|| format!("could not resolve destination {destination:?}"))?
+        .into_iter()
+        .find(|address| {
+            let good =
+                (!ipv4 && !ipv6) || (ipv4 && address.is_ipv4()) || (ipv6 && address.is_ipv6());
+            if good {
+                counter += 1;
+            }
+            good
+        });
+
+    info!(
+        "Destination {destination:} resolves to {counter} eligible address(es). Using {}",
+        address.map_or_else(|| String::from("none"), |a| a.to_string())
+    );
+
+    address.with_context(|| {
+        format!("destination {destination:?} resolves to no address in the requested IP family")
+    })
 }
