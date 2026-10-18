@@ -10,7 +10,7 @@ use clap::Parser;
 use prectrace_lib::tracers::{self, TraceConfig};
 use std::net::{IpAddr, SocketAddr};
 use tokio::task::JoinSet;
-use tracing::info;
+use tracing::{info, trace};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::args::{Cli, TraceSpec};
@@ -23,13 +23,29 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    if let Some(addr) = cli.address {
+        if addr.is_ipv4() {
+            if cli.ipv6 {
+                anyhow::bail!("specified `ipv6` and an IPv4 `--address` to bind to")
+            }
+            cli.ipv4 = true;
+        }
+        if addr.is_ipv6() {
+            if cli.ipv4 {
+                anyhow::bail!("specified `ipv4` and an IPv6 `--address` to bind to")
+            }
+            cli.ipv6 = true;
+        }
+    }
 
     let mut traces = Vec::new();
 
     for spec in cli.icmp {
         let target = resolve_destination(&spec.destination, 0, cli.ipv4, cli.ipv6).await?;
-        let tracer = tracers::icmp::IcmpTracer::new(target.ip())?;
+        let tracer =
+            tracers::icmp::IcmpTracer::new(target.ip(), cli.address, cli.interface.as_deref())?;
         traces.push(PreparedTrace::Icmp {
             tracer,
             config: trace_config(&spec, cli.timeout, cli.max_hops),
@@ -38,7 +54,13 @@ async fn main() -> anyhow::Result<()> {
 
     for spec in cli.dns {
         let target = resolve_destination(&spec.destination, 53, cli.ipv4, cli.ipv6).await?;
-        let tracer = tracers::dns::DnsTracer::new(target, cli.dns_query.clone()).await?;
+        let tracer = tracers::dns::DnsTracer::new(
+            target,
+            cli.dns_query.clone(),
+            cli.address,
+            cli.interface.as_deref(),
+        )
+        .await?;
         traces.push(PreparedTrace::Dns {
             tracer,
             config: trace_config(&spec, cli.timeout, cli.max_hops),
@@ -47,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
 
     for spec in cli.sntp {
         let target = resolve_destination(&spec.destination, 123, cli.ipv4, cli.ipv6).await?;
-        let tracer = tracers::sntp::SntpTracer::new(target).await?;
+        let tracer =
+            tracers::sntp::SntpTracer::new(target, cli.address, cli.interface.as_deref()).await?;
         traces.push(PreparedTrace::Sntp {
             tracer,
             config: trace_config(&spec, cli.timeout, cli.max_hops),
@@ -61,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks = JoinSet::new();
     for trace in traces {
         tasks.spawn(async move {
+            trace!("spawned {trace:?}");
             match trace {
                 PreparedTrace::Icmp { tracer, config } => {
                     tracers::Traceroute::new(tracer, config).run().await?;
@@ -82,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
 enum PreparedTrace {
     Icmp {
         tracer: tracers::icmp::IcmpTracer,
@@ -108,8 +133,10 @@ const fn trace_config(spec: &TraceSpec, timeout: std::time::Duration, max_hops: 
 
 fn validate_address_family(address: IpAddr, ipv4: bool, ipv6: bool) -> anyhow::Result<()> {
     if (ipv4 && address.is_ipv6()) || (ipv6 && address.is_ipv4()) {
+        trace!("bad address {address}: wanted 4={ipv4} 6={ipv6}");
         anyhow::bail!("destination {address} does not match the requested IP family");
     }
+    trace!("good address {address}");
     Ok(())
 }
 

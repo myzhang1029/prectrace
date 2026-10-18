@@ -627,6 +627,7 @@ dependencies = [
  "bytes",
  "clap",
  "hickory-proto",
+ "libc",
  "ntp",
  "rand",
  "socket2",

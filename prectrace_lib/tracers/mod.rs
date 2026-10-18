@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tracing::{error, trace};
 
 const CHAN_SIZE: usize = 256;
 
@@ -181,7 +182,7 @@ trait TracerExt: Tracer {
                         tokio::time::sleep(spacing).await;
                     }
                 }
-
+                trace!("{}: sending probe {id:x}", std::any::type_name::<Self>());
                 let probe = self.send_probe(hop, id).await?;
                 last_send = Some(probe.get_sent_time());
                 probe_tx
@@ -216,6 +217,7 @@ trait TracerExt: Tracer {
                     pending.push_back(probe);
                 }
                 packet = self.receive_packet() => {
+                    trace!("{}: got response", std::any::type_name::<Self>());
                     let (packet, source, received_time) = packet?;
                     pending.retain(|probe| {
                         if let Some(matched_resp) = self.match_probe_to_response(probe, &packet, source, received_time) {
@@ -276,11 +278,15 @@ impl<T: Tracer> Traceroute<T> {
 
         let sender_config = self.config;
         let sender_active_hops = active_hops.clone();
-        tokio::spawn(
-            self.tracer
-                .clone()
-                .send_worker(sender_config, sender_active_hops, probe_tx),
-        );
+        let st = self.tracer.clone();
+        tokio::spawn(async move {
+            if let Err(e) = st
+                .send_worker(sender_config, sender_active_hops, probe_tx)
+                .await
+            {
+                error!("Sender failed: {e}");
+            }
+        });
 
         let receiver_config = self.config;
         let receiver_active_hops = active_hops;

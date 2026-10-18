@@ -1,6 +1,7 @@
 use crate::tracers::proto::{icmp4, icmp6, raw_socket};
 use crate::tracers::{self, ResponseState};
 use socket2::{SockAddr, Socket};
+use std::ffi::CStr;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -60,9 +61,17 @@ impl tracers::Tracer for IcmpTracer {
 
 impl IcmpTracer {
     /// Create a new `IcmpTracer` for the given target IP address.
-    pub fn new(target: IpAddr) -> io::Result<Self> {
+    pub fn new(
+        target: IpAddr,
+        bind_address: Option<IpAddr>,
+        interface: Option<&CStr>,
+    ) -> io::Result<Self> {
         Ok(Self {
-            socket: Arc::new(raw_socket::new_socket(target.is_ipv4())?),
+            socket: Arc::new(raw_socket::new_socket(
+                target.is_ipv4(),
+                bind_address,
+                interface,
+            )?),
             target: SocketAddr::new(target, 0),
         })
     }

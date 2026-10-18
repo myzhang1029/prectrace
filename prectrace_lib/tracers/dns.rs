@@ -5,8 +5,9 @@ use crate::tracers::proto::{raw_socket, retain_icmp_errors_cvt_resp, udp};
 use crate::tracers::{self, ResponseState};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
+use std::ffi::CStr;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
@@ -73,9 +74,14 @@ impl tracers::Tracer for DnsTracer {
 
 impl DnsTracer {
     /// Create a tracer for `query`, sending it to `target` over UDP
-    pub async fn new(target: SocketAddr, query: Query) -> io::Result<Self> {
-        let udpsock = udp::new_socket(target.is_ipv4()).await?;
-        let rawsock = raw_socket::new_socket(target.is_ipv4())?;
+    pub async fn new(
+        target: SocketAddr,
+        query: Query,
+        bind_address: Option<IpAddr>,
+        interface: Option<&CStr>,
+    ) -> io::Result<Self> {
+        let udpsock = udp::new_socket(target.is_ipv4(), bind_address, interface).await?;
+        let rawsock = raw_socket::new_socket(target.is_ipv4(), bind_address, interface)?;
         Ok(Self {
             socket: Arc::new(udpsock),
             icmp_socket: Arc::new(rawsock),

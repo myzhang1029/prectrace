@@ -3,8 +3,9 @@ use crate::tracers::proto::{raw_socket, retain_icmp_errors_cvt_resp, udp};
 use crate::tracers::{self, ResponseState};
 use ntp::formats::{Mode, ReferenceIdentifier, timestamp::TimestampFormat};
 use ntp::packet::Packet;
+use std::ffi::CStr;
 use std::io::{self, Cursor};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
@@ -86,9 +87,13 @@ pub enum ReceivedPacket {
 
 impl SntpTracer {
     /// Creates an SNTP tracer that sends requests to UDP port 123.
-    pub async fn new(target: SocketAddr) -> io::Result<Self> {
-        let udpsock = udp::new_socket(target.is_ipv4()).await?;
-        let rawsock = raw_socket::new_socket(target.is_ipv4())?;
+    pub async fn new(
+        target: SocketAddr,
+        bind_address: Option<IpAddr>,
+        interface: Option<&CStr>,
+    ) -> io::Result<Self> {
+        let udpsock = udp::new_socket(target.is_ipv4(), bind_address, interface).await?;
+        let rawsock = raw_socket::new_socket(target.is_ipv4(), bind_address, interface)?;
         Ok(Self {
             socket: Arc::new(udpsock),
             icmp_socket: Arc::new(rawsock),

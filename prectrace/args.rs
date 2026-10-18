@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::Parser;
-use std::{str::FromStr, time::Duration};
+use std::{ffi::CString, net::IpAddr, str::FromStr, time::Duration};
 
 const DEFAULT_TIMEOUT: &str = "4s";
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
@@ -103,4 +103,11 @@ pub struct Cli {
     /// Restrict resolution to IPv6.
     #[arg(short = '6', long, conflicts_with = "ipv4")]
     pub ipv6: bool,
+    /// Local address to bind all trace sockets to.
+    /// Setting this option will implicitly set one of `ipv4` and `opv6`
+    #[arg(short = 'a', long)]
+    pub address: Option<IpAddr>,
+    /// Network interface to bind all trace sockets to.
+    #[arg(short = 'i', long)]
+    pub interface: Option<CString>,
 }

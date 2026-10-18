@@ -1,4 +1,9 @@
-use std::{io, net::SocketAddr};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use std::{
+    ffi::CStr,
+    io,
+    net::{IpAddr, SocketAddr},
+};
 use tokio::net::UdpSocket;
 
 #[derive(
@@ -28,11 +33,31 @@ impl UdpPacket {
     }
 }
 
-pub async fn new_socket(is_v4: bool) -> io::Result<UdpSocket> {
-    let addr = if is_v4 {
-        SocketAddr::from(([0, 0, 0, 0], 0))
+pub async fn new_socket(
+    is_v4: bool,
+    bind_address: Option<IpAddr>,
+    interface: Option<&CStr>,
+) -> io::Result<UdpSocket> {
+    let socket = Socket::new(
+        if is_v4 { Domain::IPV4 } else { Domain::IPV6 },
+        Type::DGRAM,
+        Some(Protocol::UDP),
+    )?;
+    if let Some(address) = bind_address {
+        assert!(
+            address.is_ipv4() == is_v4,
+            "consistency check failed: mismatching address families (this is a bug!)"
+        );
+        socket.bind(&SockAddr::from(SocketAddr::new(address, 0)))?;
+    } else if is_v4 {
+        socket.bind(&SockAddr::from(SocketAddr::from(([0, 0, 0, 0], 0))))?;
     } else {
-        SocketAddr::from(([0u16; 8], 0))
+        socket.bind(&SockAddr::from(SocketAddr::from(([0u8; 16], 0))))?;
     };
-    UdpSocket::bind(addr).await
+
+    if let Some(interface) = interface {
+        super::raw_socket::bind_interface(&socket, is_v4, interface)?;
+    }
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket.into())
 }
