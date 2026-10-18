@@ -54,7 +54,7 @@ pub struct Response<P, A> {
     additional_info: Option<A>,
 }
 
-impl<P, A> Response<P, A> {
+impl<P: Probe, A> Response<P, A> {
     pub const fn probe(&self) -> &P {
         &self.for_probe
     }
@@ -67,24 +67,15 @@ impl<P, A> Response<P, A> {
     pub const fn additional_info(&self) -> Option<&A> {
         self.additional_info.as_ref()
     }
-}
-
-impl<P: Probe, A> std::fmt::Display for Response<P, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rtt = self.received_time.map_or_else(
-            || String::from("???"),
-            |recvd| {
-                let rtt = recvd.duration_since(self.for_probe.get_sent_time());
-                format!("{:.3} ms", rtt.as_secs_f64() * 1000.0)
-            },
-        );
-        f.write_fmt(format_args!(
-            "{:<3} {:<30} {:?}\trtt {rtt}",
-            self.for_probe.get_num_hops(),
-            self.source
-                .map_or_else(|| String::from("???"), |s| s.to_string()),
-            self.state,
-        ))
+    pub fn sent_time(&self) -> Instant {
+        self.for_probe.get_sent_time()
+    }
+    pub fn received_time(&self) -> Option<Instant> {
+        self.received_time
+    }
+    pub fn rtt(&self) -> Option<Duration> {
+        self.received_time
+            .map(|received| received.duration_since(self.for_probe.get_sent_time()))
     }
 }
 
@@ -273,6 +264,13 @@ impl<T: Tracer> Traceroute<T> {
     }
 
     pub async fn run(self) -> io::Result<()> {
+        self.run_with_output(crate::outputs::TextOutput).await
+    }
+
+    pub async fn run_with_output<O>(self, mut output: O) -> io::Result<()>
+    where
+        O: crate::outputs::Output<T>,
+    {
         let (probe_tx, probe_rx) = mpsc::channel(CHAN_SIZE);
         let (record_tx, mut record_rx) = mpsc::unbounded_channel();
         let active_hops = Arc::new(AtomicU8::new(self.config.max_hops));
@@ -302,7 +300,7 @@ impl<T: Tracer> Traceroute<T> {
         });
 
         while let Some(record) = record_rx.recv().await {
-            println!("{record}");
+            output.write(&record)?;
         }
 
         Ok(())

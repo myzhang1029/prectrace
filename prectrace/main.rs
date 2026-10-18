@@ -8,12 +8,13 @@ mod resolution;
 
 use anyhow::Context;
 use clap::Parser;
+use prectrace_lib::outputs::OutputKind;
 use prectrace_lib::tracers::{self, TraceConfig};
 use tokio::task::JoinSet;
 use tracing::trace;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::args::{Cli, TraceSpec};
+use crate::args::{Cli, OutputFormat, TraceSpec};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -85,20 +86,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut tasks = JoinSet::new();
+    let output = cli.output;
     for trace in traces {
         tasks.spawn(async move {
             trace!("spawned {trace:?}");
             match trace {
                 PreparedTrace::Icmp { tracer, config } => {
-                    tracers::Traceroute::new(tracer, config).run().await?;
+                    run_trace(tracer, config, output).await?;
                 }
                 PreparedTrace::Dns { tracer, config } => {
-                    tracers::Traceroute::new(tracer, config).run().await?;
+                    run_trace(tracer, config, output).await?;
                 }
                 PreparedTrace::Sntp { tracer, config } => {
-                    tracers::Traceroute::new(tracer, config).run().await?;
+                    run_trace(tracer, config, output).await?;
                 }
             }
+
             Ok::<(), std::io::Error>(())
         });
     }
@@ -107,6 +110,20 @@ async fn main() -> anyhow::Result<()> {
         result.context("trace task failed")??;
     }
     Ok(())
+}
+
+async fn run_trace<T>(tracer: T, config: TraceConfig, output: OutputFormat) -> std::io::Result<()>
+where
+    T: tracers::Tracer,
+    T::AdditionalInfo: prectrace_lib::outputs::SerializableInfo,
+{
+    let output = match output {
+        OutputFormat::Json => OutputKind::Json,
+        OutputFormat::Text => OutputKind::Text,
+    };
+    tracers::Traceroute::new(tracer, config)
+        .run_with_output(output)
+        .await
 }
 
 #[derive(Debug, Clone)]

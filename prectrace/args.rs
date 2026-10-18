@@ -1,11 +1,17 @@
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::{ffi::CString, net::IpAddr, str::FromStr, time::Duration};
 
 const DEFAULT_TIMEOUT: &str = "4s";
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_SPACING: Duration = Duration::from_millis(100);
 const DEFAULT_MAX_HOPS: u8 = 30;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    Json,
+    Text,
+}
 
 fn parse_duration(value: &str) -> Result<Duration, &'static str> {
     let value = value.trim();
@@ -110,4 +116,7 @@ pub struct Cli {
     /// Network interface to bind all trace sockets to.
     #[arg(short = 'i', long)]
     pub interface: Option<CString>,
+    /// Output format for trace responses.
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output: OutputFormat,
 }
