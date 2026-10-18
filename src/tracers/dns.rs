@@ -1,12 +1,12 @@
 //! DNS-over-UDP tracing support
 
 use crate::tracers::constants::L4PROTO_UDP;
-use crate::tracers::proto::{icmp4, icmp6, raw_socket};
+use crate::tracers::proto::{raw_socket, retain_icmp_errors_cvt_resp, udp};
 use crate::tracers::{self, ResponseState};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
@@ -74,15 +74,11 @@ impl tracers::Tracer for DnsTracer {
 impl DnsTracer {
     /// Create a tracer for `query`, sending it to `target` over UDP
     pub async fn new(target: SocketAddr, query: Query) -> io::Result<Self> {
-        let socket = UdpSocket::bind(if target.is_ipv4() {
-            SocketAddr::from(([0, 0, 0, 0], 0))
-        } else {
-            SocketAddr::from(([0u16; 8], 0))
-        })
-        .await?;
+        let udpsock = udp::new_socket(target.is_ipv4()).await?;
+        let rawsock = raw_socket::new_socket(target.is_ipv4())?;
         Ok(Self {
-            socket: Arc::new(socket),
-            icmp_socket: raw_socket::new_socket(target.ip())?,
+            socket: Arc::new(udpsock),
+            icmp_socket: Arc::new(rawsock),
             target,
             query,
         })
@@ -150,61 +146,40 @@ impl DnsTracer {
             }
             ReceivedPacket::Dns(_) => None,
             ReceivedPacket::Icmp(packet) => {
-                self.match_icmp_time_exceeded(probe, packet, source, received_time)
+                self.match_icmp_error(probe, packet, source, received_time)
             }
         }
     }
 
-    fn match_icmp_time_exceeded(
+    fn match_icmp_error(
         &self,
         probe: &Probe,
         packet: &[u8],
         source: SocketAddr,
         received_time: Instant,
     ) -> Option<tracers::Response<Probe, Message>> {
-        let udp_inner_payload = if self.target.is_ipv4() {
-            let (response, payload) = icmp4::parse(packet).ok()?;
-            if !matches!(response, icmp4::Response::TimeExceeded(_)) {
-                return None;
-            }
-            let (header, payload) = icmp4::IpHeader::try_parse_ref_skip_option(payload).ok()?;
-            if header.protocol != L4PROTO_UDP
-                || IpAddr::V4(header.destination_ip()) != self.target.ip()
+        let filter = |udp_packet| {
+            let Ok(udp_packet) = udp::UdpPacket::try_ref_from_bytes(udp_packet) else {
+                return false;
+            };
+            trace!("received ICMP for UDP: {udp_packet:?}");
+            if udp_packet.source_port() != probe.source_port
+                || udp_packet.dest_port() != self.target.port()
             {
-                return None;
+                return false;
             }
-            payload
-        } else {
-            let (response, payload) = icmp6::parse(packet).ok()?;
-            if !matches!(response, icmp6::Response::TimeExceeded(_)) {
-                return None;
-            }
-            let (header, payload) = icmp6::IpHeader::try_parse_ref_skip_option(payload).ok()?;
-            if header.next_header != L4PROTO_UDP
-                || IpAddr::V6(header.destination_ip()) != self.target.ip()
-            {
-                return None;
-            }
-            payload
+            let Some(message) = Message::from_vec(&udp_packet.data).ok() else {
+                return false;
+            };
+            message.id == probe.id
         };
-        let udp_packet = UdpPacket::try_ref_from_bytes(udp_inner_payload).ok()?;
-        trace!("received ICMP for UDP: {udp_packet:?}");
-
-        if udp_packet.source_port() != probe.source_port
-            || udp_packet.dest_port() != self.target.port()
-        {
-            return None;
-        }
-        let message = Message::from_vec(&udp_packet.data).ok()?;
-        if message.id != probe.id {
-            return None;
-        }
+        let state = retain_icmp_errors_cvt_resp(self.target.ip(), packet, L4PROTO_UDP, filter)?;
 
         Some(tracers::Response {
             for_probe: *probe,
             source: Some(source),
             received_time: Some(received_time),
-            state: ResponseState::OnTheWay,
+            state,
             additional_info: None,
         })
     }
@@ -212,39 +187,4 @@ impl DnsTracer {
 
 fn protocol_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-}
-
-#[derive(
-    Debug,
-    PartialEq,
-    Eq,
-    zerocopy_derive::TryFromBytes,
-    zerocopy_derive::Immutable,
-    zerocopy_derive::KnownLayout,
-)]
-#[repr(C)]
-pub struct UdpPacket {
-    pub source_port: [u8; 2],
-    pub dest_port: [u8; 2],
-    pub length: [u8; 2],
-    pub checksum: [u8; 2],
-    pub data: [u8],
-}
-impl UdpPacket {
-    #[must_use]
-    pub const fn source_port(&self) -> u16 {
-        u16::from_be_bytes(self.source_port)
-    }
-    #[must_use]
-    pub const fn dest_port(&self) -> u16 {
-        u16::from_be_bytes(self.dest_port)
-    }
-    #[must_use]
-    pub const fn length(&self) -> u16 {
-        u16::from_be_bytes(self.length)
-    }
-    #[must_use]
-    pub const fn checksum(&self) -> u16 {
-        u16::from_be_bytes(self.checksum)
-    }
 }

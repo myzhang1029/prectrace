@@ -1,5 +1,5 @@
 use super::common::{Error, convert_error};
-use crate::tracers::constants::L4PROTO_ICMP6;
+use crate::tracers::{self, constants::L4PROTO_ICMP6};
 use std::net::Ipv6Addr;
 use zerocopy::TryFromBytes;
 
@@ -159,25 +159,45 @@ pub enum Response<'data> {
     TimeExceeded(&'data IcmpTimeExceededOrUnreachableHeader),
 }
 
-pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
-    // Note that `socket2` strips away the IPv6 header (but doesn't strip away the IPv4 header). Why??
-    let (icmp_header, _) = IcmpHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
-    match icmp_header.icmp_type {
-        IcmpType::EchoReply => {
-            let (echo, rest) =
-                IcmpEchoHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
-            Ok((Response::Echo(echo), rest))
+impl<'data> Response<'data> {
+    pub fn parse(packet: &'data [u8]) -> Result<(Self, &'data [u8]), Error> {
+        // Note that `socket2` strips away the IPv6 header (but doesn't strip away the IPv4 header). Why??
+        let (icmp_header, _) = IcmpHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
+        match icmp_header.icmp_type {
+            IcmpType::EchoReply => {
+                let (echo, rest) =
+                    IcmpEchoHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
+                Ok((Response::Echo(echo), rest))
+            }
+            IcmpType::EchoRequest => Err(Error::UnexpectedEchoRequest),
+            IcmpType::DestinationUnreachable => {
+                let (error, rest) =
+                    IcmpTimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
+                        .map_err(convert_error)?;
+                Ok((Response::DestinationUnreachable(error), rest))
+            }
+            IcmpType::TimeExceeded => {
+                let (error, rest) =
+                    IcmpTimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
+                        .map_err(convert_error)?;
+                Ok((Response::TimeExceeded(error), rest))
+            }
         }
-        IcmpType::EchoRequest => Err(Error::UnexpectedEchoRequest),
-        IcmpType::DestinationUnreachable => {
-            let (error, rest) = IcmpTimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
-                .map_err(convert_error)?;
-            Ok((Response::DestinationUnreachable(error), rest))
-        }
-        IcmpType::TimeExceeded => {
-            let (error, rest) = IcmpTimeExceededOrUnreachableHeader::try_ref_from_prefix(packet)
-                .map_err(convert_error)?;
-            Ok((Response::TimeExceeded(error), rest))
+    }
+
+    /// Convert the [`Self::TimeExceeded`] and [`Self::DestinationUnreachable`] variants
+    /// to the appropriate variants of [`tracers::ResponseState`].
+    ///
+    /// # Panics
+    ///
+    /// If the supplied type is not one of the two.
+    pub const fn to_response_state(&self) -> tracers::ResponseState {
+        match self {
+            Self::TimeExceeded(_) => tracers::ResponseState::OnTheWay,
+            Self::DestinationUnreachable(_) => tracers::ResponseState::Unreachable,
+            Self::Echo(_) => panic!(
+                "`to_response_state` must only be called on `TimeExceeded` or `DestinationUnreachable`"
+            ),
         }
     }
 }

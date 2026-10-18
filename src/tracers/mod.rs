@@ -167,7 +167,7 @@ trait TracerExt: Tracer {
         active_hops: Arc<AtomicU8>,
         probe_tx: mpsc::Sender<Self::Probe>,
     ) -> io::Result<()> {
-        let mut id = 0xffff0000 & rand::random::<u32>();
+        let mut id = 0xffff_0000 & rand::random::<u32>();
         let mut last_send: Option<Instant> = None;
 
         loop {

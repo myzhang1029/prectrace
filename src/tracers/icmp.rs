@@ -116,7 +116,7 @@ impl IcmpTracer {
 // See `IcmpTracer::classify` for what this macro is for.
 macro_rules! gen_classify_arms_for_proto {
     ($proto:ident, $matcher:ident, $probe:ident, $packet:ident) => {{
-        let (icmp_hdr, payload) = $proto::parse($packet).ok()?;
+        let (icmp_hdr, payload) = $proto::Response::parse($packet).ok()?;
         match icmp_hdr {
             $proto::Response::Echo(echo)
                 if (echo.identifier() == $probe.identifier
@@ -143,12 +143,7 @@ macro_rules! gen_classify_arms_for_proto {
                 {
                     return None;
                 }
-                if matches!(icmp_hdr, $proto::Response::TimeExceeded(_)) {
-                    Some(ResponseState::OnTheWay)
-                } else {
-                    // DestinationUnreachable
-                    Some(ResponseState::Unreachable)
-                }
+                Some(icmp_hdr.to_response_state())
             }
             // Either not the ICMP types we expect, or the packet is not in response to `probe`
             _ => None,

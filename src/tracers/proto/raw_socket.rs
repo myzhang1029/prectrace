@@ -1,16 +1,15 @@
 use core::mem::MaybeUninit;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::net::SocketAddr;
 use std::time::Instant;
 use tokio::io::unix::AsyncFd;
 use tracing::trace;
 
 pub type RawSocket = AsyncFd<Socket>;
 
-pub fn new_socket(target: IpAddr) -> io::Result<Arc<RawSocket>> {
-    let socket = if target.is_ipv4() {
+pub fn new_socket(is_v4: bool) -> io::Result<RawSocket> {
+    let socket = if is_v4 {
         Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
     } else {
         Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
@@ -22,7 +21,7 @@ pub fn new_socket(target: IpAddr) -> io::Result<Arc<RawSocket>> {
     // (actually `socket2` provides no mechanism to close it.)
     // Since this type owns the `Socket` instance, the lifetime guarantee is
     // also satisfied.
-    Ok(Arc::new(unsafe { AsyncFd::register(socket)? }))
+    Ok(unsafe { AsyncFd::register(socket)? })
 }
 
 pub async fn receive_packet(socket: &RawSocket) -> io::Result<(Vec<u8>, SocketAddr, Instant)> {

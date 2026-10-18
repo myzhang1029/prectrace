@@ -7,7 +7,7 @@
 //! will create its own L3 header.
 
 use super::common::{Error, convert_error};
-use crate::tracers::constants::L4PROTO_ICMP;
+use crate::tracers::{self, constants::L4PROTO_ICMP};
 use std::net::Ipv4Addr;
 use zerocopy::{IntoBytes, TryFromBytes};
 
@@ -229,36 +229,55 @@ pub enum Response<'data> {
     IpProtoNotIcmp(u8),
 }
 
-pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
-    let (ip_header, packet) = IpHeader::try_parse_ref_skip_option(packet)?;
-    if ip_header.protocol != L4PROTO_ICMP {
-        return Ok((Response::IpProtoNotIcmp(ip_header.protocol), packet));
-    }
-    // Note that the Icmp type headers expect the ICMP header to still be present,
-    // so subsequent steps use `packet` instead of what is given here.
-    let (icmp_header, remaining) =
-        IcmpHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
-    match icmp_header.icmp_type {
-        IcmpType::EchoReply => {
-            if checksum(icmp_header.as_bytes(), remaining) != 0 {
-                return Err(Error::BadIcmpChecksum);
+impl<'data> Response<'data> {
+    pub fn parse(packet: &'data [u8]) -> Result<(Self, &'data [u8]), Error> {
+        let (ip_header, packet) = IpHeader::try_parse_ref_skip_option(packet)?;
+        if ip_header.protocol != L4PROTO_ICMP {
+            return Ok((Response::IpProtoNotIcmp(ip_header.protocol), packet));
+        }
+        // Note that the Icmp type headers expect the ICMP header to still be present,
+        // so subsequent steps use `packet` instead of what is given here.
+        let (icmp_header, remaining) =
+            IcmpHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
+        match icmp_header.icmp_type {
+            IcmpType::EchoReply => {
+                if checksum(icmp_header.as_bytes(), remaining) != 0 {
+                    return Err(Error::BadIcmpChecksum);
+                }
+                let (eh, rest) =
+                    IcmpEchoHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
+                Ok((Response::Echo(eh), rest))
             }
-            let (eh, rest) = IcmpEchoHeader::try_ref_from_prefix(packet).map_err(convert_error)?;
-            Ok((Response::Echo(eh), rest))
+            IcmpType::TimeExceeded => {
+                let (teh, rest) =
+                    IcmpTimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
+                        .map_err(convert_error)?;
+                Ok((Response::TimeExceeded(teh), rest))
+            }
+            IcmpType::DestinationUnreachable => {
+                let (duh, rest) =
+                    IcmpTimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
+                        .map_err(convert_error)?;
+                Ok((Response::DestinationUnreachable(duh), rest))
+            }
+            IcmpType::EchoRequest => Err(Error::UnexpectedEchoRequest),
         }
-        IcmpType::TimeExceeded => {
-            let (teh, rest) =
-                IcmpTimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
-                    .map_err(convert_error)?;
-            Ok((Response::TimeExceeded(teh), rest))
+    }
+
+    /// Convert the [`Self::TimeExceeded`] and [`Self::DestinationUnreachable`] variants
+    /// to the appropriate variants of [`tracers::ResponseState`].
+    ///
+    /// # Panics
+    ///
+    /// If the supplied type is not one of the two.
+    pub const fn to_response_state(&self) -> tracers::ResponseState {
+        match self {
+            Self::TimeExceeded(_) => tracers::ResponseState::OnTheWay,
+            Self::DestinationUnreachable(_) => tracers::ResponseState::Unreachable,
+            Self::Echo(_) | Self::IpProtoNotIcmp(_) => panic!(
+                "`to_response_state` must only be called on `TimeExceeded` or `DestinationUnreachable`"
+            ),
         }
-        IcmpType::DestinationUnreachable => {
-            let (duh, rest) =
-                IcmpTimeExceededOrUnreachableHeaderAndNextHeader::try_ref_from_prefix(packet)
-                    .map_err(convert_error)?;
-            Ok((Response::DestinationUnreachable(duh), rest))
-        }
-        IcmpType::EchoRequest => Err(Error::UnexpectedEchoRequest),
     }
 }
 
