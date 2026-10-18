@@ -20,8 +20,13 @@ pub enum Error {
 
 /// Convert a [`TryCastError`] into an owned type to get rid of the lifetime parameter
 /// and implement [`std::error::Error`].
-#[allow(clippy::needless_pass_by_value, reason = "intended to be used in `map_err")]
-pub(super) fn convert_error<Target: TryFromBytes + KnownLayout>(e: TryCastError<&[u8], Target>) -> Error {
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "intended to be used in `map_err"
+)]
+pub(super) fn convert_error<Target: TryFromBytes + KnownLayout>(
+    e: TryCastError<&[u8], Target>,
+) -> Error {
     let typename = std::any::type_name::<Target>();
     // Depending on the log level, we either include the full error message
     // (with a representation of the bytes), or just a reason for the failure.

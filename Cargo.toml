@@ -15,6 +15,7 @@ path = "src/lib.rs"
 anyhow = "1"
 bytes = { version = "^1, >=1.11.1", default-features = false }
 clap = { version = "4", features = ["cargo", "derive", "string"] }
+hickory-proto = "0.26"
 rand = "0.10"
 socket2 = "0.6"
 thiserror = "2"

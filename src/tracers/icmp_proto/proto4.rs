@@ -7,10 +7,9 @@
 //! will create its own L3 header.
 
 use super::common::{Error, convert_error};
+use crate::tracers::constants::L4PROTO_ICMP;
 use std::net::Ipv4Addr;
 use zerocopy::{IntoBytes, TryFromBytes};
-
-pub const ICMP_PROTO_NUMBER: u8 = 1;
 
 // The Internet Checksum (RFC 1071)
 fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
@@ -125,7 +124,7 @@ impl IpHeader {
         Ipv4Addr::from_octets(self.destination_ip)
     }
     pub const fn is_icmp(&self) -> bool {
-        self.protocol == ICMP_PROTO_NUMBER
+        self.protocol == L4PROTO_ICMP
     }
     /// Like `try_ref_from_prefix`, but skips over the IP options if present.
     ///
@@ -232,7 +231,7 @@ pub enum Response<'data> {
 
 pub fn parse(packet: &[u8]) -> Result<(Response<'_>, &[u8]), Error> {
     let (ip_header, packet) = IpHeader::try_parse_ref_skip_option(packet)?;
-    if ip_header.protocol != ICMP_PROTO_NUMBER {
+    if ip_header.protocol != L4PROTO_ICMP {
         return Ok((Response::IpProtoNotIcmp(ip_header.protocol), packet));
     }
     // Note that the Icmp type headers expect the ICMP header to still be present,

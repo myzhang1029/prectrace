@@ -1,13 +1,12 @@
-use super::{proto4, proto6};
+use crate::tracers::icmp_proto::{RawSocket, new_socket, proto4, proto6, receive_packet};
 use crate::tracers::{self, ResponseState};
-use core::mem::MaybeUninit;
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use socket2::{SockAddr, Socket};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::unix::AsyncFd;
-use tracing::{debug, trace};
+use tracing::debug;
 use zerocopy::{IntoBytes, TryFromBytes};
 
 /// A [`Probe`] represents something that we sent out and are hoping to get a response for.
@@ -30,7 +29,7 @@ impl crate::tracers::Probe for Probe {
 
 #[derive(Debug, Clone)]
 pub struct IcmpTracer {
-    socket: Arc<AsyncFd<Socket>>,
+    socket: Arc<RawSocket>,
     target: SocketAddr,
     identifier: u16,
 }
@@ -62,24 +61,8 @@ impl tracers::Tracer for IcmpTracer {
 impl IcmpTracer {
     /// Create a new `IcmpTracer` for the given target IP address.
     pub fn new(target: IpAddr) -> io::Result<Self> {
-        let socket = Socket::new(
-            if target.is_ipv4() {
-                Domain::IPV4
-            } else {
-                Domain::IPV6
-            },
-            Type::RAW,
-            Some(if target.is_ipv4() {
-                Protocol::ICMPV4
-            } else {
-                Protocol::ICMPV6
-            }),
-        )?;
-        socket.set_nonblocking(true)?;
-        let socket = unsafe { AsyncFd::register(socket)? };
-
         Ok(Self {
-            socket: Arc::new(socket),
+            socket: new_socket(target)?,
             target: SocketAddr::new(target, 0),
             identifier: rand::random(),
         })
@@ -136,26 +119,7 @@ impl IcmpTracer {
 
     /// Wait until a packet is received on the socket and return the packet, peer address, and timestamp.
     pub async fn receive_packet(&self) -> io::Result<(Vec<u8>, SocketAddr, Instant)> {
-        let do_recv_callback = |sock: &AsyncFd<Socket>| {
-            let mut buffer = [const { MaybeUninit::uninit() }; 4096];
-            let (length, source) = sock.get_ref().recv_from(&mut buffer)?;
-            let timestamp = Instant::now();
-            let bytes = buffer[..length]
-                .iter()
-                .map(|byte| unsafe { byte.assume_init() })
-                .collect::<Vec<u8>>();
-            let source = source
-                .as_socket()
-                .expect("raw ICMP socket returned a non-IP address");
-            trace!("received packet from {source} len={length}: {bytes:02x?}");
-            Ok((bytes, source, timestamp))
-        };
-        loop {
-            let mut readiness = self.socket.readable().await?;
-            if let Ok(packet) = readiness.try_io(do_recv_callback) {
-                return packet;
-            }
-        }
+        receive_packet(&self.socket).await
     }
 }
 

@@ -1,8 +1,7 @@
 use super::common::{Error, convert_error};
+use crate::tracers::constants::L4PROTO_ICMP6;
 use std::net::Ipv6Addr;
 use zerocopy::TryFromBytes;
-
-pub const ICMP6_NH_NUMBER: u8 = 58;
 
 #[derive(
     zerocopy_derive::TryFromBytes,
@@ -41,7 +40,7 @@ impl IpHeader {
         Ipv6Addr::from_octets(self.destination_ip)
     }
     pub const fn is_icmp(&self) -> bool {
-        self.next_header == ICMP6_NH_NUMBER
+        self.next_header == L4PROTO_ICMP6
     }
     /// Exactly `try_ref_from_prefix` with a check for the version field.
     /// The suffix `_skip_option` is meaningless and just to match the IPv4 counterpart.

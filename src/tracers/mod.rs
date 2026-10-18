@@ -1,5 +1,7 @@
-mod dns;
+pub(crate) mod constants;
+pub mod dns;
 pub mod icmp;
+pub(crate) mod icmp_proto;
 
 use std::collections::VecDeque;
 use std::io;
@@ -10,11 +12,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const CHAN_SIZE: usize = 256;
-
-#[derive(Debug, Clone, Copy)]
-pub enum Protocol {
-    Icmp,
-}
 
 /// States that the response can be in
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,7 +35,6 @@ impl ResponseState {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TraceConfig {
-    pub protocol: Protocol,
     pub cycle_interval: Duration,
     pub min_send_spacing: Duration,
     pub timeout: Duration,
@@ -55,16 +51,35 @@ pub struct Response<P, A> {
     additional_info: Option<A>,
 }
 
+impl<P, A> Response<P, A> {
+    pub const fn probe(&self) -> &P {
+        &self.for_probe
+    }
+    pub const fn source(&self) -> Option<SocketAddr> {
+        self.source
+    }
+    pub const fn state(&self) -> ResponseState {
+        self.state
+    }
+    pub const fn additional_info(&self) -> Option<&A> {
+        self.additional_info.as_ref()
+    }
+}
+
 impl<P: Probe, A> std::fmt::Display for Response<P, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rtt = self.received_time.map_or_else(||String::from("???"), |recvd| {
-            let rtt = recvd.duration_since(self.for_probe.get_sent_time());
-            format!("{:.3} ms", rtt.as_secs_f64() * 1000.0)
-        });
+        let rtt = self.received_time.map_or_else(
+            || String::from("???"),
+            |recvd| {
+                let rtt = recvd.duration_since(self.for_probe.get_sent_time());
+                format!("{:.3} ms", rtt.as_secs_f64() * 1000.0)
+            },
+        );
         f.write_fmt(format_args!(
             "{:<3} {:<30} {:?}\trtt {rtt}",
             self.for_probe.get_num_hops(),
-            self.source.map_or_else(|| String::from("???"), |s| s.to_string()),
+            self.source
+                .map_or_else(|| String::from("???"), |s| s.to_string()),
             self.state,
         ))
     }
