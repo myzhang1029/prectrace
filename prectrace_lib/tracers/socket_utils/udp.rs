@@ -30,7 +30,7 @@ pub async fn new(
         socket.bind(&SockAddr::from(SocketAddr::from(([0, 0, 0, 0], 0))))?;
     } else {
         socket.bind(&SockAddr::from(SocketAddr::from(([0u8; 16], 0))))?;
-    };
+    }
 
     if let Some(interface) = interface {
         super::raw::bind_interface(&socket, is_v4, interface)?;
@@ -49,11 +49,10 @@ pub fn set_ttl(sock: &UdpSocket, ttl: u32, is_v4: bool) -> io::Result<()> {
         // that's too much work.
         // see socket2::Socket::set_unicast_hops_v6 and std::sys::net::connection::socket::setsockopt
         let fd = libc::c_int::from(sock.as_raw_fd());
-        let option = libc::c_int::try_from(ttl).map_err(|_|
-            io::ErrorKind::InvalidInput
-        )?;
-        let option_ptr = (&raw const option) as *const libc::c_void;
-        let option_len = size_of::<libc::c_int>() as libc::socklen_t;
+        let option = libc::c_int::try_from(ttl).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let option_ptr = (&raw const option).cast::<libc::c_void>();
+        let option_len = libc::socklen_t::try_from(size_of::<libc::c_int>())
+            .expect("sizeof(int) should always fit in a socklen_t (this is a bug!)");
         // SAFETY:
         // - `sock` is opened for the duration of this call since we have a valid reference.
         // - `option_len` is the correct length of the value we passed in, a c_int.

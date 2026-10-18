@@ -7,11 +7,7 @@ use tracing::trace;
 
 use std::net::IpAddr;
 
-pub(crate) fn validate_address_family(
-    address: IpAddr,
-    ipv4: bool,
-    ipv6: bool,
-) -> anyhow::Result<()> {
+pub fn validate_address_family(address: IpAddr, ipv4: bool, ipv6: bool) -> anyhow::Result<()> {
     if (ipv4 && address.is_ipv6()) || (ipv6 && address.is_ipv4()) {
         trace!("bad address {address}: wanted 4={ipv4} 6={ipv6}");
         anyhow::bail!("destination {address} does not match the requested IP family");
@@ -20,7 +16,7 @@ pub(crate) fn validate_address_family(
     Ok(())
 }
 
-pub(crate) async fn resolve_destination(
+pub async fn resolve_destination(
     destination: &str,
     default_port: u16,
     ipv4: bool,
