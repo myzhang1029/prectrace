@@ -1,11 +1,9 @@
 mod dns;
 pub mod icmp;
-pub mod icmp_tracer;
 
-use std::collections::HashMap;
-use std::fmt::Display;
+use std::collections::VecDeque;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -45,64 +43,212 @@ pub struct TraceConfig {
     pub max_hops: u8,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct TraceRecord {
-    pub protocol: Protocol,
-    pub hop: u8,
-    pub sequence: u16,
-    pub sent_time: Instant,
-    pub received_time: Option<Instant>,
-    pub source: Option<SocketAddr>,
-    pub state: ResponseState,
+/// A [`Response`] is constructed for each received packet that matches a [`Probe`] we sent out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Response<P, A> {
+    for_probe: P,
+    source: Option<SocketAddr>,
+    received_time: Option<Instant>,
+    state: ResponseState,
+    additional_info: Option<A>,
 }
 
-impl Display for TraceRecord {
+impl<P: Probe, A> std::fmt::Display for Response<P, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let rtt = if let Some(received) = self.received_time {
-            let rtt = received.duration_since(self.sent_time);
+            let rtt = received.duration_since(self.for_probe.get_sent_time());
             format!("{:.3} ms", rtt.as_secs_f64() * 1000.0)
         } else {
             String::from("???")
         };
         f.write_fmt(format_args!(
-            "{:<3} {:<30} {:?}\trtt {rtt}, seq {}",
-            self.hop,
+            "{:<3} {:<30} {:?}\trtt {rtt}",
+            self.for_probe.get_num_hops(),
             self.source
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| String::from("???")),
             self.state,
-            self.sequence,
         ))
     }
 }
 
-pub struct Tracer {
-    target: IpAddr,
+pub trait Probe: Clone + Send {
+    fn get_sent_time(&self) -> Instant;
+    fn get_num_hops(&self) -> u8;
+}
+
+/// A [`Tracer`] is a controller of a socket (or a set of sockets) that can actively send out
+/// probes and receive them from the network. It should NOT keep internal state of the list
+/// of sent probes (that's the job of the [`Traceroute`] runner), to the extent possible.
+///
+/// The absolute minimum information a response needs to provide are
+/// - Timestamp of reception
+/// - The peer that sent the response
+/// - The state of the probe ([`ResponseState`]).
+///
+/// It may, optionally, provide additional information described by its `AdditionalInfo`
+/// associated type.
+pub trait Tracer: Send + Sync + 'static {
+    /// Type that holds a record per sent probe
+    type Probe: Probe;
+    /// Whatever raw information this tracer receives from the network
+    type ReceivedPacket;
+    /// Additional information that this tracer can provide
+    type AdditionalInfo: Send;
+
+    /// Send a probe to the network and return the probe that got sent.
+    fn send_probe(
+        &self,
+        num_hops: u8,
+        sequence: u16,
+    ) -> impl Future<Output = io::Result<Self::Probe>> + Send;
+
+    /// Listen for a packet on the network, possibly unrelated to any sent probes.
+    ///
+    /// This function MAY return all packets it sees. Actually matching packets to probes
+    /// is the job of `match_probe_to_response`.
+    /// Despite so, a good implementation SHOULD filter out completely irrelevant packets
+    /// that is, e.g., for a different L3/L4 protocol, because `match_probe_to_response`
+    /// will be invoked on all sent packets.
+    fn receive_packet(
+        &self,
+    ) -> impl Future<Output = io::Result<(Self::ReceivedPacket, SocketAddr, Instant)>> + Send;
+
+    /// Check that, if `packet` matches `probe`, return a completed `Response`. Otherwise,
+    /// return `None`.
+    fn match_probe_to_response(
+        &self,
+        probe: &Self::Probe,
+        packet: &Self::ReceivedPacket,
+        source: SocketAddr,
+        received_time: Instant,
+    ) -> Option<Response<Self::Probe, Self::AdditionalInfo>>;
+}
+
+trait TracerExt: Tracer {
+    async fn send_worker(
+        self: Arc<Self>,
+        config: TraceConfig,
+        active_hops: Arc<AtomicU8>,
+        probe_tx: mpsc::Sender<Self::Probe>,
+    ) -> io::Result<()> {
+        let mut sequence = 0u16;
+        let mut last_send: Option<Instant> = None;
+
+        loop {
+            let cycle_limit = active_hops.load(Ordering::Relaxed);
+            let mut hop = 1;
+            while hop <= cycle_limit {
+                if let Some(sent_at) = last_send {
+                    let spacing = config.min_send_spacing.saturating_sub(sent_at.elapsed());
+                    if !spacing.is_zero() {
+                        tokio::time::sleep(spacing).await;
+                    }
+                }
+
+                let probe = self.send_probe(hop, sequence).await?;
+                last_send = Some(probe.get_sent_time());
+                probe_tx
+                    .send(probe)
+                    .await
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "receiver stopped"))?;
+                sequence = sequence.wrapping_add(1);
+                hop += 1;
+
+                if hop > active_hops.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            tokio::time::sleep(config.cycle_interval).await;
+        }
+    }
+
+    async fn receive_worker(
+        self: Arc<Self>,
+        config: TraceConfig,
+        active_hops: Arc<AtomicU8>,
+        mut probe_rx: mpsc::Receiver<Self::Probe>,
+        record_tx: mpsc::UnboundedSender<Response<Self::Probe, Self::AdditionalInfo>>,
+    ) -> io::Result<()> {
+        let mut pending = VecDeque::new();
+        let mut cleanup = tokio::time::interval(Duration::from_millis(25));
+
+        loop {
+            tokio::select! {
+                probe = probe_rx.recv() => {
+                    let Some(probe) = probe else { return Ok(()); };
+                    pending.push_back(probe);
+                }
+                packet = self.receive_packet() => {
+                    let (packet, source, received_time) = packet?;
+                    pending.retain(|probe| {
+                        if let Some(matched_resp) = self.match_probe_to_response(probe, &packet, source, received_time) {
+                            if matched_resp.state.is_terminal() {
+                                active_hops.fetch_min(probe.get_num_hops(), Ordering::Relaxed);
+                            }
+                            // If `record_rx` is dropped, no one cares about the result anymore
+                            record_tx.send(matched_resp).ok();
+                            false
+                        } else{
+                            true
+                        }
+                    });
+                }
+                _ = cleanup.tick() => {
+                    let now = Instant::now();
+                    pending.retain(|probe| {
+                        if now.duration_since(probe.get_sent_time()) > config.timeout {
+                            let lost_resp = Response {
+                                for_probe: probe.clone(),
+                                source: None,
+                                received_time: None,
+                                state: ResponseState::Lost,
+                                additional_info: None,
+                            };
+                            // If `record_rx` is dropped, no one cares about the result anymore
+                            record_tx.send(lost_resp).ok();
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl<T: Tracer> TracerExt for T {}
+
+pub struct Traceroute<T> {
+    tracer: Arc<T>,
     config: TraceConfig,
 }
 
-impl Tracer {
-    pub const fn new(target: IpAddr, config: TraceConfig) -> Self {
-        Self { target, config }
+impl<T: Tracer> Traceroute<T> {
+    pub fn new(tracer: T, config: TraceConfig) -> Self {
+        Self {
+            tracer: Arc::new(tracer),
+            config,
+        }
     }
 
     pub async fn run(self) -> io::Result<()> {
-        let icmp = icmp::IcmpTracer::new(self.target)?;
         let (probe_tx, probe_rx) = mpsc::channel(CHAN_SIZE);
-        let (record_tx, mut record_rx) = mpsc::channel(CHAN_SIZE);
+        let (record_tx, mut record_rx) = mpsc::unbounded_channel();
         let active_hops = Arc::new(AtomicU8::new(self.config.max_hops));
 
         let sender_config = self.config;
-        let sender_icmp = icmp.clone();
         let sender_active_hops = active_hops.clone();
-        tokio::spawn(async move {
-            send_worker(sender_icmp, sender_config, sender_active_hops, probe_tx).await
-        });
+        tokio::spawn(
+            self.tracer
+                .clone()
+                .send_worker(sender_config, sender_active_hops, probe_tx),
+        );
 
         let receiver_config = self.config;
         let receiver_active_hops = active_hops;
-        tokio::spawn(receive_worker(
-            icmp,
+        tokio::spawn(self.tracer.receive_worker(
             receiver_config,
             receiver_active_hops,
             probe_rx,
@@ -114,105 +260,5 @@ impl Tracer {
         }
 
         Ok(())
-    }
-}
-
-async fn send_worker(
-    icmp: icmp::IcmpTracer,
-    config: TraceConfig,
-    active_hops: Arc<AtomicU8>,
-    probe_tx: mpsc::Sender<icmp::Probe>,
-) -> io::Result<()> {
-    let mut sequence = 0u16;
-    let mut last_send: Option<Instant> = None;
-
-    loop {
-        let cycle_limit = active_hops.load(Ordering::Relaxed);
-        let mut hop = 1;
-        while hop <= cycle_limit {
-            if let Some(sent_at) = last_send {
-                let spacing = config.min_send_spacing.saturating_sub(sent_at.elapsed());
-                if !spacing.is_zero() {
-                    tokio::time::sleep(spacing).await;
-                }
-            }
-
-            let probe = icmp.send_probe(hop, sequence).await?;
-            last_send = Some(probe.sent_time);
-            probe_tx
-                .send(probe)
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "receiver stopped"))?;
-            sequence = sequence.wrapping_add(1);
-            hop += 1;
-
-            if hop > active_hops.load(Ordering::Relaxed) {
-                break;
-            }
-        }
-        tokio::time::sleep(config.cycle_interval).await;
-    }
-}
-
-async fn receive_worker(
-    icmp: icmp::IcmpTracer,
-    config: TraceConfig,
-    active_hops: Arc<AtomicU8>,
-    mut probe_rx: mpsc::Receiver<icmp::Probe>,
-    record_tx: mpsc::Sender<TraceRecord>,
-) -> io::Result<()> {
-    let mut pending = HashMap::new();
-    let mut cleanup = tokio::time::interval(Duration::from_millis(25));
-
-    loop {
-        tokio::select! {
-            probe = probe_rx.recv() => {
-                let Some(probe) = probe else { return Ok(()); };
-                pending.insert(probe.sequence, probe);
-            }
-            packet = icmp.receive_packet() => {
-                let (packet, source, received_time) = packet?;
-                let matched = pending.iter().find_map(|(sequence, probe)| {
-                    icmp.classify(*probe, &packet, source, received_time)
-                        .map(|response| (*sequence, response))
-                });
-                if let Some((sequence, response)) = matched {
-                    let probe = pending.remove(&sequence).expect("pending probe disappeared");
-                    if response.state.is_terminal() {
-                        active_hops.fetch_min(probe.hop, Ordering::Relaxed);
-                    }
-                    record_tx.send(TraceRecord {
-                        protocol: config.protocol,
-                        hop: probe.hop,
-                        sequence: probe.sequence,
-                        sent_time: probe.sent_time,
-                        received_time: Some(response.received_time),
-                        source: Some(response.source),
-                        state: response.state,
-                    }).await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "output stopped"))?;
-                }
-            }
-            _ = cleanup.tick() => {
-                let expired = pending.extract_if(|_, probe| probe.sent_time.elapsed() >= config.timeout)
-                    .map(|(_, probe)| probe)
-                    .collect::<Vec<_>>();
-                for probe in expired {
-                    if probe.hop == active_hops.load(Ordering::Relaxed)
-                        && probe.hop < config.max_hops
-                    {
-                        active_hops.fetch_max(probe.hop + 1, Ordering::Relaxed);
-                    }
-                    record_tx.send(TraceRecord {
-                        protocol: config.protocol,
-                        hop: probe.hop,
-                        sequence: probe.sequence,
-                        sent_time: probe.sent_time,
-                        received_time: None,
-                        source: None,
-                        state: ResponseState::Lost,
-                    }).await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "output stopped"))?;
-                }
-            }
-        }
     }
 }

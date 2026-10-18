@@ -27,7 +27,8 @@ async fn main() -> anyhow::Result<()> {
         timeout: Duration::from_secs(4),
         max_hops: 30,
     };
+    let tracer = tracers::icmp::IcmpTracer::new(target)?;
 
-    tracers::Tracer::new(target, tc).run().await?;
+    tracers::Traceroute::new(tracer, tc).run().await?;
     Ok(())
 }
