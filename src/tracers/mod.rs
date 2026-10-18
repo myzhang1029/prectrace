@@ -85,6 +85,8 @@ impl<P: Probe, A> std::fmt::Display for Response<P, A> {
     }
 }
 
+/// A [`Probe`] represents something that we sent out and are hoping to get a response for.
+/// The response will be represented by a [`Response`] when it arrives.
 pub trait Probe: Clone + Send {
     fn get_sent_time(&self) -> Instant;
     fn get_num_hops(&self) -> u8;

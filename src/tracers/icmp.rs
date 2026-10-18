@@ -9,8 +9,6 @@ use tokio::io::unix::AsyncFd;
 use tracing::debug;
 use zerocopy::{IntoBytes, TryFromBytes};
 
-/// A [`Probe`] represents something that we sent out and are hoping to get a response for.
-/// The response will be represented by a [`Response`] when it arrives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Probe {
     hop: u8,
@@ -62,7 +60,7 @@ impl IcmpTracer {
     /// Create a new `IcmpTracer` for the given target IP address.
     pub fn new(target: IpAddr) -> io::Result<Self> {
         Ok(Self {
-            socket: raw_socket::new_socket(target)?,
+            socket: Arc::new(raw_socket::new_socket(target.is_ipv4())?),
             target: SocketAddr::new(target, 0),
             identifier: rand::random(),
         })
