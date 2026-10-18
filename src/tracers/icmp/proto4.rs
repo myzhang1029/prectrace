@@ -39,6 +39,7 @@ fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
+    #[allow(clippy::cast_possible_truncation)]
     !(sum as u16)
 }
 
@@ -130,7 +131,7 @@ impl IpHeader {
     ///
     /// # Returns
     ///
-    /// (Ip4Header, payload) if successful, or whatever error encountered.
+    /// (`Ip4Header`, payload) if successful, or whatever error encountered.
     pub fn try_parse_ref_skip_option(packet: &[u8]) -> Result<(Self, &[u8]), Error> {
         let (header, _) = Self::try_ref_from_prefix(packet).map_err(convert_error)?;
         if header.ihl() < 5 {

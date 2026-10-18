@@ -1,4 +1,4 @@
-//! ICMPv[46] support stuff.
+//! `ICMPv[46]` support stuff.
 //!
 //! Note that, unlike the unfair convention in RFCs or other packages with
 //! historical considerations, where `ICMP` refers to `ICMP4` and `ICMP6`

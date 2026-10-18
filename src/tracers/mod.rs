@@ -26,9 +26,11 @@ pub enum ResponseState {
 }
 
 impl ResponseState {
+    #[must_use]
     pub const fn is_on_the_way(&self) -> bool {
-        matches!(self, ResponseState::OnTheWay)
+        matches!(self, Self::OnTheWay)
     }
+    #[must_use]
     pub const fn is_terminal(&self) -> bool {
         !self.is_on_the_way()
     }
@@ -55,18 +57,14 @@ pub struct Response<P, A> {
 
 impl<P: Probe, A> std::fmt::Display for Response<P, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let rtt = if let Some(received) = self.received_time {
-            let rtt = received.duration_since(self.for_probe.get_sent_time());
+        let rtt = self.received_time.map_or_else(||String::from("???"), |recvd| {
+            let rtt = recvd.duration_since(self.for_probe.get_sent_time());
             format!("{:.3} ms", rtt.as_secs_f64() * 1000.0)
-        } else {
-            String::from("???")
-        };
+        });
         f.write_fmt(format_args!(
             "{:<3} {:<30} {:?}\trtt {rtt}",
             self.for_probe.get_num_hops(),
-            self.source
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| String::from("???")),
+            self.source.map_or_else(|| String::from("???"), |s| s.to_string()),
             self.state,
         ))
     }
@@ -78,8 +76,10 @@ pub trait Probe: Clone + Send {
 }
 
 /// A [`Tracer`] is a controller of a socket (or a set of sockets) that can actively send out
-/// probes and receive them from the network. It should NOT keep internal state of the list
-/// of sent probes (that's the job of the [`Traceroute`] runner), to the extent possible.
+/// probes and receive them from the network.
+///
+/// This struct should NOT keep internal state of the list of sent probes (that's the job of
+/// the [`Traceroute`] runner), to the extent possible.
 ///
 /// The absolute minimum information a response needs to provide are
 /// - Timestamp of reception

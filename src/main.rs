@@ -3,12 +3,9 @@
 // This work is conducted at Carnegie Mellon University
 // SPDX-License-Identifier: Apache-2.0
 
-mod outputs;
-mod tracers;
-
 use std::net::IpAddr;
 use std::time::Duration;
-use tracers::{Protocol, TraceConfig};
+use prectrace_lib::tracers::{self, Protocol, TraceConfig};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]

@@ -132,11 +132,11 @@ pub struct IcmpTimeExceededOrUnreachableHeader {
 }
 
 impl IcmpEchoHeader {
-    pub const fn identifier(&self) -> u16 {
+    pub const fn identifier(self) -> u16 {
         u16::from_be_bytes(self.identifier)
     }
 
-    pub const fn sequence(&self) -> u16 {
+    pub const fn sequence(self) -> u16 {
         u16::from_be_bytes(self.sequence)
     }
 

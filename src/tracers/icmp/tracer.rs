@@ -86,7 +86,7 @@ impl IcmpTracer {
     }
 
     /// Reset the identifier during a trace.
-    pub fn set_identifier(&mut self, identifier: u16) {
+    pub const fn set_identifier(&mut self, identifier: u16) {
         self.identifier = identifier;
     }
 
@@ -94,8 +94,8 @@ impl IcmpTracer {
     ///
     /// # Arguments
     ///
-    /// - num_hops: the TTL (IPv4) or Hop Limit (IPv6) to use for this probe
-    /// - sequence: the ICMP(6) echo sequence number to use for this probe
+    /// - `num_hops`: the TTL (IPv4) or Hop Limit (IPv6) to use for this probe
+    /// - `sequence`: the ICMP(6) echo sequence number to use for this probe
     ///
     /// # Returns
     ///
@@ -203,6 +203,7 @@ macro_rules! gen_classify_arms_for_proto {
 }
 
 impl IcmpTracer {
+    #[must_use]
     pub fn match_probe_to_response(
         &self,
         probe: &Probe,
