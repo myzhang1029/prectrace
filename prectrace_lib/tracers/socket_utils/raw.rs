@@ -5,11 +5,12 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 use tokio::io::unix::AsyncFd;
-use tracing::trace;
+use tracing::{debug, trace};
 
 pub type RawSocket = AsyncFd<Socket>;
 
-pub fn new_socket(
+#[tracing::instrument]
+pub fn new(
     is_v4: bool,
     bind_address: Option<IpAddr>,
     interface: Option<&CStr>,
@@ -20,12 +21,14 @@ pub fn new_socket(
         Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
     }?;
     if let Some(address) = bind_address {
+        trace!("binding socket to {address}");
         socket.bind(&socket2::SockAddr::from(SocketAddr::new(address, 0)))?;
     }
     if let Some(interface) = interface {
         bind_interface(&socket, is_v4, interface)?;
     }
     socket.set_nonblocking(true)?;
+    debug!("created raw socket on {:?}", socket.local_addr());
     // SAFETY: `Socket.as_raw_fd` returns a fd because
     // "This type [Socket] simply wraps an instance of a file descriptor"
     // We just created it above and will not close it, so it remains a valid one.
@@ -47,6 +50,7 @@ pub fn new_socket(
     target_os = "android",
 ))]
 pub fn bind_interface(socket: &Socket, is_v4: bool, interface: &CStr) -> io::Result<()> {
+    trace!("binding socket to ifname={interface:?}");
     let ptr = interface.as_ptr();
     // SAFETY: just a normal C FFI call.
     let ifidx = unsafe { libc::if_nametoindex(ptr) };

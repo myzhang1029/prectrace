@@ -11,7 +11,6 @@ use std::net::IpAddr;
 mod common;
 pub mod icmp4;
 pub mod icmp6;
-pub mod raw_socket;
 pub mod udp;
 
 /// Check the content of a IP payload (i.e. begins with the L4 header) `packet` and

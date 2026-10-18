@@ -1,5 +1,6 @@
 use crate::tracers::constants::L4PROTO_UDP;
-use crate::tracers::proto::{raw_socket, retain_icmp_errors_cvt_resp, udp};
+use crate::tracers::proto::{retain_icmp_errors_cvt_resp, udp};
+use crate::tracers::socket_utils::{raw as raw_socket, udp as udp_socket};
 use crate::tracers::{self, ResponseState};
 use ntp::formats::{Mode, ReferenceIdentifier, timestamp::TimestampFormat};
 use ntp::packet::Packet;
@@ -92,8 +93,8 @@ impl SntpTracer {
         bind_address: Option<IpAddr>,
         interface: Option<&CStr>,
     ) -> io::Result<Self> {
-        let udpsock = udp::new_socket(target.is_ipv4(), bind_address, interface).await?;
-        let rawsock = raw_socket::new_socket(target.is_ipv4(), bind_address, interface)?;
+        let udpsock = udp_socket::new(target.is_ipv4(), bind_address, interface).await?;
+        let rawsock = raw_socket::new(target.is_ipv4(), bind_address, interface)?;
         Ok(Self {
             socket: Arc::new(udpsock),
             icmp_socket: Arc::new(rawsock),
@@ -106,6 +107,7 @@ impl SntpTracer {
         let request = Packet::new_client();
         let transmit_timestamp = u64::from(request.transmit_time);
         let pkt: Vec<u8> = request.into();
+        trace!("sending to {}", self.target);
         self.socket.send_to(&pkt, self.target).await?;
 
         Ok(Probe {

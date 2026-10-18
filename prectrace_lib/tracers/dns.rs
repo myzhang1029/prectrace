@@ -1,7 +1,8 @@
 //! DNS-over-UDP tracing support
 
 use crate::tracers::constants::L4PROTO_UDP;
-use crate::tracers::proto::{raw_socket, retain_icmp_errors_cvt_resp, udp};
+use crate::tracers::proto::{retain_icmp_errors_cvt_resp, udp};
+use crate::tracers::socket_utils::{raw as raw_socket, udp as udp_socket};
 use crate::tracers::{self, ResponseState};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
@@ -80,8 +81,8 @@ impl DnsTracer {
         bind_address: Option<IpAddr>,
         interface: Option<&CStr>,
     ) -> io::Result<Self> {
-        let udpsock = udp::new_socket(target.is_ipv4(), bind_address, interface).await?;
-        let rawsock = raw_socket::new_socket(target.is_ipv4(), bind_address, interface)?;
+        let udpsock = udp_socket::new(target.is_ipv4(), bind_address, interface).await?;
+        let rawsock = raw_socket::new(target.is_ipv4(), bind_address, interface)?;
         Ok(Self {
             socket: Arc::new(udpsock),
             icmp_socket: Arc::new(rawsock),
@@ -99,6 +100,7 @@ impl DnsTracer {
         message.emit(&mut encoder).map_err(protocol_error)?;
 
         self.socket.set_ttl(u32::from(num_hops))?;
+        trace!("sending to {}", self.target);
         self.socket.send_to(&bytes, self.target).await?;
 
         Ok(Probe {

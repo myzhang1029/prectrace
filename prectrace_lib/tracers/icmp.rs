@@ -1,4 +1,5 @@
-use crate::tracers::proto::{icmp4, icmp6, raw_socket};
+use crate::tracers::proto::{icmp4, icmp6};
+use crate::tracers::socket_utils::raw as raw_socket;
 use crate::tracers::{self, ResponseState};
 use socket2::{SockAddr, Socket};
 use std::ffi::CStr;
@@ -67,11 +68,7 @@ impl IcmpTracer {
         interface: Option<&CStr>,
     ) -> io::Result<Self> {
         Ok(Self {
-            socket: Arc::new(raw_socket::new_socket(
-                target.is_ipv4(),
-                bind_address,
-                interface,
-            )?),
+            socket: Arc::new(raw_socket::new(target.is_ipv4(), bind_address, interface)?),
             target: SocketAddr::new(target, 0),
         })
     }

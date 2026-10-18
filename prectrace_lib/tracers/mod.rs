@@ -3,6 +3,7 @@ pub mod dns;
 pub mod icmp;
 pub(crate) mod proto;
 pub mod sntp;
+pub(crate) mod socket_utils;
 
 use std::collections::VecDeque;
 use std::io;
@@ -290,12 +291,15 @@ impl<T: Tracer> Traceroute<T> {
 
         let receiver_config = self.config;
         let receiver_active_hops = active_hops;
-        tokio::spawn(self.tracer.receive_worker(
-            receiver_config,
-            receiver_active_hops,
-            probe_rx,
-            record_tx,
-        ));
+        tokio::spawn(async move {
+            if let Err(e) = self
+                .tracer
+                .receive_worker(receiver_config, receiver_active_hops, probe_rx, record_tx)
+                .await
+            {
+                error!("Receiver failed: {e}");
+            }
+        });
 
         while let Some(record) = record_rx.recv().await {
             println!("{record}");
