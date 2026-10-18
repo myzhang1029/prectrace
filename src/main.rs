@@ -18,7 +18,8 @@ async fn main() -> anyhow::Result<()> {
         .ok();
     //let target = "fdc0:d227:306:2c01:0:5d2:2:ad10".parse::<IpAddr>()?;
     //let target = "8.8.4.4".parse::<IpAddr>()?;
-    let target = "44.30.70.1:53".parse::<SocketAddr>()?;
+    //let target = "[fd42:23eb:6cf::161]:123".parse::<SocketAddr>()?;
+    let target = "44.30.70.1:123".parse::<SocketAddr>()?;
     let mut query = hickory_proto::op::Query::new();
     query
         .set_name(hickory_proto::rr::Name::from_str("example.com.")?)
@@ -30,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
         max_hops: 30,
     };
     //let tracer = tracers::icmp::IcmpTracer::new(target)?;
-    let tracer = tracers::dns::DnsTracer::new(target, query).await?;
+    //let tracer = tracers::dns::DnsTracer::new(target, query).await?;
+    let tracer = tracers::sntp::SntpTracer::new(target).await?;
 
     tracers::Traceroute::new(tracer, tc).run().await?;
     Ok(())

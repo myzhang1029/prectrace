@@ -16,6 +16,7 @@ anyhow = "1"
 bytes = { version = "^1, >=1.11.1", default-features = false }
 clap = { version = "4", features = ["cargo", "derive", "string"] }
 hickory-proto = "0.26"
+ntp = "0.5"
 rand = "0.10"
 socket2 = "0.6"
 thiserror = "2"

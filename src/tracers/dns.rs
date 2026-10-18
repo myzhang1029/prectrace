@@ -168,6 +168,9 @@ impl DnsTracer {
             {
                 return false;
             }
+            // If the sending host does not support RFC 4884, then the UDP header
+            // is all that they'll pass back to us. In this case, we'd fail right
+            // here in the `Message` decoding process.
             let Some(message) = Message::from_vec(&udp_packet.data).ok() else {
                 return false;
             };

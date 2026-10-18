@@ -2,6 +2,7 @@ pub(crate) mod constants;
 pub mod dns;
 pub mod icmp;
 pub(crate) mod proto;
+pub mod sntp;
 
 use std::collections::VecDeque;
 use std::io;
