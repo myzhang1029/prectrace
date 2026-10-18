@@ -70,7 +70,7 @@ impl<P: Probe, A> Response<P, A> {
     pub fn sent_time(&self) -> Instant {
         self.for_probe.get_sent_time()
     }
-    pub fn received_time(&self) -> Option<Instant> {
+    pub const fn received_time(&self) -> Option<Instant> {
         self.received_time
     }
     pub fn rtt(&self) -> Option<Duration> {
@@ -88,7 +88,7 @@ impl<P: Probe, A> Response<P, A> {
 ///
 /// A typical implementation records some form of the `id` value passed by [`Tracer::send_probe`],
 /// so that [`Tracer::match_probe_to_response`] can identify the correct response.
-pub trait Probe: Clone + Send {
+pub const trait Probe: Clone + Send {
     fn get_sent_time(&self) -> Instant;
     fn get_num_hops(&self) -> u8;
 }
