@@ -1,4 +1,4 @@
-use crate::tracers::icmp_proto::{RawSocket, new_socket, proto4, proto6, receive_packet};
+use crate::tracers::proto::{icmp4, icmp6, raw_socket};
 use crate::tracers::{self, ResponseState};
 use socket2::{SockAddr, Socket};
 use std::io;
@@ -29,7 +29,7 @@ impl crate::tracers::Probe for Probe {
 
 #[derive(Debug, Clone)]
 pub struct IcmpTracer {
-    socket: Arc<RawSocket>,
+    socket: Arc<raw_socket::RawSocket>,
     target: SocketAddr,
     identifier: u16,
 }
@@ -62,7 +62,7 @@ impl IcmpTracer {
     /// Create a new `IcmpTracer` for the given target IP address.
     pub fn new(target: IpAddr) -> io::Result<Self> {
         Ok(Self {
-            socket: new_socket(target)?,
+            socket: raw_socket::new_socket(target)?,
             target: SocketAddr::new(target, 0),
             identifier: rand::random(),
         })
@@ -91,11 +91,11 @@ impl IcmpTracer {
             // (I wonder how big this Future is..)
             let inner = sock.get_ref();
             if self.target.is_ipv4() {
-                let pkt = proto4::IcmpEchoHeader::echo_request(self.identifier, sequence);
+                let pkt = icmp4::IcmpEchoHeader::echo_request(self.identifier, sequence);
                 inner.set_ttl_v4(u32::from(num_hops))?;
                 inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
             } else {
-                let pkt = proto6::IcmpEchoHeader::echo_request(self.identifier, sequence);
+                let pkt = icmp6::IcmpEchoHeader::echo_request(self.identifier, sequence);
                 inner.set_unicast_hops_v6(u32::from(num_hops))?;
                 inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
             }
@@ -119,7 +119,7 @@ impl IcmpTracer {
 
     /// Wait until a packet is received on the socket and return the packet, peer address, and timestamp.
     pub async fn receive_packet(&self) -> io::Result<(Vec<u8>, SocketAddr, Instant)> {
-        receive_packet(&self.socket).await
+        raw_socket::receive_packet(&self.socket).await
     }
 }
 
@@ -176,9 +176,9 @@ impl IcmpTracer {
         received_time: Instant,
     ) -> Option<tracers::Response<Probe, ()>> {
         let state = if self.target.is_ipv4() {
-            gen_classify_arms_for_proto!(proto4, matches_probe_v4, self, probe, packet)
+            gen_classify_arms_for_proto!(icmp4, matches_probe_v4, self, probe, packet)
         } else {
-            gen_classify_arms_for_proto!(proto6, matches_probe_v6, self, probe, packet)
+            gen_classify_arms_for_proto!(icmp6, matches_probe_v6, self, probe, packet)
         }?;
         Some(tracers::Response {
             for_probe: *probe,

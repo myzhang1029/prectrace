@@ -1,7 +1,7 @@
 //! DNS-over-UDP tracing support
 
 use crate::tracers::constants::L4PROTO_UDP;
-use crate::tracers::icmp_proto::{self, proto4, proto6};
+use crate::tracers::proto::{icmp4, icmp6, raw_socket};
 use crate::tracers::{self, ResponseState};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
@@ -40,7 +40,7 @@ impl tracers::Probe for Probe {
 #[derive(Debug, Clone)]
 pub struct DnsTracer {
     socket: Arc<UdpSocket>,
-    icmp_socket: Arc<icmp_proto::RawSocket>,
+    icmp_socket: Arc<raw_socket::RawSocket>,
     target: SocketAddr,
     query: Query,
 }
@@ -80,7 +80,7 @@ impl DnsTracer {
         .await?;
         Ok(Self {
             socket: Arc::new(socket),
-            icmp_socket: icmp_proto::new_socket(target.ip())?,
+            icmp_socket: raw_socket::new_socket(target.ip())?,
             target,
             query,
         })
@@ -116,7 +116,7 @@ impl DnsTracer {
                 let message = Message::from_vec(&dns_bytes[..length]).map_err(protocol_error)?;
                 Ok((ReceivedPacket::Dns(message), source, time))
             }
-            result = icmp_proto::receive_packet(&self.icmp_socket) => {
+            result = raw_socket::receive_packet(&self.icmp_socket) => {
                 let (packet, source, received_time) = result?;
                 Ok((ReceivedPacket::Icmp(packet), source, received_time))
             }
@@ -162,11 +162,11 @@ impl DnsTracer {
         received_time: Instant,
     ) -> Option<tracers::Response<Probe, Message>> {
         let udp_inner_payload = if self.target.is_ipv4() {
-            let (response, payload) = proto4::parse(packet).ok()?;
-            if !matches!(response, proto4::Response::TimeExceeded(_)) {
+            let (response, payload) = icmp4::parse(packet).ok()?;
+            if !matches!(response, icmp4::Response::TimeExceeded(_)) {
                 return None;
             }
-            let (header, payload) = proto4::IpHeader::try_parse_ref_skip_option(payload).ok()?;
+            let (header, payload) = icmp4::IpHeader::try_parse_ref_skip_option(payload).ok()?;
             if header.protocol != L4PROTO_UDP
                 || IpAddr::V4(header.destination_ip()) != self.target.ip()
             {
@@ -174,11 +174,11 @@ impl DnsTracer {
             }
             payload
         } else {
-            let (response, payload) = proto6::parse(packet).ok()?;
-            if !matches!(response, proto6::Response::TimeExceeded(_)) {
+            let (response, payload) = icmp6::parse(packet).ok()?;
+            if !matches!(response, icmp6::Response::TimeExceeded(_)) {
                 return None;
             }
-            let (header, payload) = proto6::IpHeader::try_parse_ref_skip_option(payload).ok()?;
+            let (header, payload) = icmp6::IpHeader::try_parse_ref_skip_option(payload).ok()?;
             if header.next_header != L4PROTO_UDP
                 || IpAddr::V6(header.destination_ip()) != self.target.ip()
             {

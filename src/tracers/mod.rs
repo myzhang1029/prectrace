@@ -1,7 +1,7 @@
 pub(crate) mod constants;
 pub mod dns;
 pub mod icmp;
-pub(crate) mod icmp_proto;
+pub(crate) mod proto;
 
 use std::collections::VecDeque;
 use std::io;
