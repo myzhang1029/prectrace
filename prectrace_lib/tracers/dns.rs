@@ -99,7 +99,7 @@ impl DnsTracer {
         let mut encoder = BinEncoder::new(&mut bytes);
         message.emit(&mut encoder).map_err(protocol_error)?;
 
-        self.socket.set_ttl(u32::from(num_hops))?;
+        udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
         trace!("sending to {}", self.target);
         self.socket.send_to(&bytes, self.target).await?;
 

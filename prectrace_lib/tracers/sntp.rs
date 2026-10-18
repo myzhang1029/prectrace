@@ -103,7 +103,7 @@ impl SntpTracer {
     }
 
     async fn send_probe(&self, num_hops: u8) -> io::Result<Probe> {
-        self.socket.set_ttl(u32::from(num_hops))?;
+        udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
         let request = Packet::new_client();
         let transmit_timestamp = u64::from(request.transmit_time);
         let pkt: Vec<u8> = request.into();
