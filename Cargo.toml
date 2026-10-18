@@ -5,11 +5,11 @@ edition = "2024"
 
 [[bin]]
 name = "prectrace"
-path = "src/main.rs"
+path = "prectrace/main.rs"
 
 [lib]
 name = "prectrace_lib"
-path = "src/lib.rs"
+path = "prectrace_lib/lib.rs"
 
 [dependencies]
 anyhow = "1"
