@@ -1,5 +1,7 @@
+use super::time_conversion::Converter;
 use super::{Output, SerializableInfo};
 use crate::tracers::{Probe, Response, Tracer};
+use chrono::SecondsFormat;
 use serde_json::json;
 use std::io;
 
@@ -12,10 +14,15 @@ where
     T::AdditionalInfo: SerializableInfo,
 {
     fn write(&mut self, response: &Response<T::Probe, T::AdditionalInfo>) -> io::Result<()> {
+        let converter = Converter::init_or_get_global();
+        let sent_time = converter
+            .instant_datetime(response.sent_time())
+            .expect("system time saturated (nothing we can do)");
         let value = json!({
             "hop": response.probe().get_num_hops(),
             "source": response.source(),
             "state": format!("{:?}", response.state()),
+            "sent": sent_time.to_rfc3339_opts(SecondsFormat::AutoSi, true),
             "rtt_ms": response.rtt().map(|s| s.as_secs_f64()*1000.0),
             "additional_info": response.additional_info().map(SerializableInfo::json),
         });
