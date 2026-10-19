@@ -14,8 +14,7 @@ use zerocopy::{IntoBytes, TryFromBytes};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Probe {
     hop: u8,
-    identifier: u16,
-    sequence: u16,
+    id: u32,
     sent_time: Instant,
 }
 
@@ -26,6 +25,20 @@ impl crate::tracers::Probe for Probe {
     fn get_num_hops(&self) -> u8 {
         self.hop
     }
+    fn get_id(&self) -> u32 {
+        self.id
+    }
+}
+
+// Get (identifier: u16) and (sequence: u16)
+const fn get_icmp_param(id: u32) -> (u16, u16) {
+    let Ok(identifier) = u16::try_from(id >> 16) else {
+        panic!("u16 conversion failed (this is a bug!)");
+    };
+    let Ok(sequence) = u16::try_from(id & 0xffff) else {
+        panic!("u16 conversion failed (this is a bug!)");
+    };
+    (identifier, sequence)
 }
 
 #[derive(Debug, Clone)]
@@ -40,9 +53,7 @@ impl tracers::Tracer for IcmpTracer {
     type AdditionalInfo = ();
 
     async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
-        let identifier = u16::try_from(id >> 16).expect("u16 conversion failed (this is a bug!)");
-        let sequence = u16::try_from(id & 0xffff).expect("u16 conversion failed (this is a bug!)");
-        self.send_probe(num_hops, identifier, sequence).await
+        self.send_probe(num_hops, id).await
     }
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
@@ -78,12 +89,8 @@ impl IcmpTracer {
     }
 
     #[tracing::instrument(level = "info", skip(self), fields(target = %self.target))]
-    pub async fn send_probe(
-        &self,
-        num_hops: u8,
-        identifier: u16,
-        sequence: u16,
-    ) -> io::Result<Probe> {
+    pub async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Probe> {
+        let (identifier, sequence) = get_icmp_param(id);
         // All captured stuff are `Copy` so we make the closure once outside the loop
         let sender = |sock: &AsyncFd<Socket>| {
             // Don't create the packet until we know the socket is writable
@@ -111,8 +118,7 @@ impl IcmpTracer {
 
         Ok(Probe {
             hop: num_hops,
-            identifier,
-            sequence,
+            id,
             sent_time,
         })
     }
@@ -127,10 +133,10 @@ impl IcmpTracer {
 macro_rules! gen_classify_arms_for_proto {
     ($proto:ident, $matcher:ident, $probe:ident, $packet:ident) => {{
         let (icmp_hdr, payload) = $proto::Response::parse($packet).ok()?;
+        let (identifier, sequence) = get_icmp_param($probe.id);
         match icmp_hdr {
             $proto::Response::Echo(echo)
-                if (echo.identifier() == $probe.identifier
-                    && echo.sequence() == $probe.sequence) =>
+                if (echo.identifier() == identifier && echo.sequence() == sequence) =>
             {
                 Some(ResponseState::Reached)
             }
@@ -148,8 +154,8 @@ macro_rules! gen_classify_arms_for_proto {
                     return None;
                 };
                 if echo.header.icmp_type != $proto::IcmpType::EchoRequest
-                    || echo.identifier() != $probe.identifier
-                    || echo.sequence() != $probe.sequence
+                    || echo.identifier() != identifier
+                    || echo.sequence() != sequence
                 {
                     return None;
                 }

@@ -35,6 +35,8 @@ pub struct SntpInfo {
 pub struct Probe {
     hop: u8,
     transmit_timestamp: u64,
+    // unused in probe identification
+    id: u32,
     source_port: u16,
     sent_time: Instant,
 }
@@ -43,9 +45,11 @@ impl tracers::Probe for Probe {
     fn get_sent_time(&self) -> Instant {
         self.sent_time
     }
-
     fn get_num_hops(&self) -> u8 {
         self.hop
+    }
+    fn get_id(&self) -> u32 {
+        self.id
     }
 }
 
@@ -61,8 +65,8 @@ impl tracers::Tracer for SntpTracer {
     type ReceivedPacket = ReceivedPacket;
     type AdditionalInfo = SntpInfo;
 
-    async fn send_probe(&self, num_hops: u8, _id: u32) -> io::Result<Self::Probe> {
-        self.send_probe(num_hops).await
+    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
+        self.send_probe(num_hops, id).await
     }
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
@@ -106,7 +110,7 @@ impl SntpTracer {
         })
     }
 
-    async fn send_probe(&self, num_hops: u8) -> io::Result<Probe> {
+    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Probe> {
         udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
         let request = Packet::new_client();
         let transmit_timestamp = u64::from(request.transmit_time);
@@ -117,6 +121,7 @@ impl SntpTracer {
         Ok(Probe {
             hop: num_hops,
             transmit_timestamp,
+            id,
             source_port: self.socket.local_addr()?.port(),
             sent_time: Instant::now(),
         })

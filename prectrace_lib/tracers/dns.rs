@@ -24,7 +24,7 @@ pub enum ReceivedPacket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Probe {
     hop: u8,
-    id: u16,
+    id: u32,
     source_port: u16,
     sent_time: Instant,
 }
@@ -33,10 +33,20 @@ impl tracers::Probe for Probe {
     fn get_sent_time(&self) -> Instant {
         self.sent_time
     }
-
     fn get_num_hops(&self) -> u8 {
         self.hop
     }
+    fn get_id(&self) -> u32 {
+        self.id
+    }
+}
+
+// Get an `u16` DNS id
+const fn get_dns_id(id: u32) -> u16 {
+    let Ok(r) = u16::try_from((id >> 24) | (id & 0xff)) else {
+        panic!("u16 conversion failed (this is a bug!)")
+    };
+    r
 }
 
 #[derive(Debug, Clone)]
@@ -53,8 +63,6 @@ impl tracers::Tracer for DnsTracer {
     type AdditionalInfo = Message;
 
     async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
-        let id = u16::try_from((id >> 24) | (id & 0xff))
-            .expect("u16 conversion failed (this is a bug!)");
         self.send_probe(num_hops, id).await
     }
 
@@ -95,8 +103,9 @@ impl DnsTracer {
         })
     }
 
-    async fn send_probe(&self, num_hops: u8, id: u16) -> io::Result<Probe> {
-        let mut message = Message::new(id, MessageType::Query, OpCode::Query);
+    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Probe> {
+        let dns_id = get_dns_id(id);
+        let mut message = Message::new(dns_id, MessageType::Query, OpCode::Query);
         message.add_query(self.query.clone());
 
         let mut bytes = Vec::with_capacity(512);
@@ -141,7 +150,7 @@ impl DnsTracer {
     ) -> Option<tracers::Response<Probe, Message>> {
         match packet {
             ReceivedPacket::Dns(packet)
-                if packet.id == probe.id && source.ip() == self.target.ip() =>
+                if packet.id == get_dns_id(probe.id) && source.ip() == self.target.ip() =>
             {
                 if packet.message_type == MessageType::Response {
                     Some(tracers::Response {
@@ -186,7 +195,7 @@ impl DnsTracer {
             let Some(message) = Message::from_vec(&udp_packet.data).ok() else {
                 return false;
             };
-            message.id == probe.id
+            message.id == get_dns_id(probe.id)
         };
         let state = retain_icmp_errors_cvt_resp(self.target.ip(), packet, L4PROTO_UDP, filter)?;
 

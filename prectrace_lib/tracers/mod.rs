@@ -80,10 +80,12 @@ impl<P: Probe, A> Response<P, A> {
 /// # Implementation
 ///
 /// A typical implementation records some form of the `id` value passed by [`Tracer::send_probe`],
-/// so that [`Tracer::match_probe_to_response`] can identify the correct response.
+/// so that [`Tracer::match_probe_to_response`] can identify the correct response and [`Self::get_id`]
+/// can recover that value (for output generation).
 pub const trait Probe: Clone + Send {
     fn get_sent_time(&self) -> Instant;
     fn get_num_hops(&self) -> u8;
+    fn get_id(&self) -> u32;
 }
 
 /// A [`Tracer`] is a controller of a socket (or a set of sockets) that can actively send out

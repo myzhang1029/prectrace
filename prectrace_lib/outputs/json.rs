@@ -28,6 +28,7 @@ where
             "state": format!("{:?}", response.state()),
             "sent": sent_time.to_rfc3339_opts(SecondsFormat::AutoSi, true),
             "rtt_ms": response.rtt().map(|s| s.as_secs_f64()*1000.0),
+            "id": response.probe().get_id(),
             "additional_info": response.additional_info().map(SerializableInfo::json),
             "trace_info": trace_info,
         });
