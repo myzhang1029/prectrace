@@ -16,10 +16,11 @@ anyhow = "1"
 bytes = { version = "^1, >=1.11.1", default-features = false }
 clap = { version = "4", features = ["cargo", "derive", "string"] }
 chrono = "0.4"
-hickory-proto = "0.26"
+hickory-proto = { version = "0.26", features = ["serde"] }
 libc = "0.2"
-ntp = "0.5"
+ntp_usg-proto = "5"
 rand = "0.10"
+serde = "1"
 serde_json = "1"
 socket2 = "0.6"
 thiserror = "2"

@@ -1,19 +1,17 @@
-mod impls;
 mod json;
 mod text;
 mod time_conversion;
 
 use crate::tracers::{Response, Tracer};
 pub use json::JsonOutput;
-use serde_json::Value;
+use serde::Serialize;
 use std::io;
 pub use text::TextOutput;
 
-pub trait SerializableInfo {
-    fn json(&self) -> Value;
-}
-
-pub trait Output<T: Tracer> {
+pub trait Output<T>
+where
+    T: Tracer,
+{
     fn write(
         &mut self,
         response: &Response<T::Probe, T::AdditionalInfo>,
@@ -30,7 +28,7 @@ pub enum OutputKind {
 impl<T> Output<T> for OutputKind
 where
     T: Tracer,
-    T::AdditionalInfo: SerializableInfo,
+    T::AdditionalInfo: Serialize,
 {
     fn write(
         &mut self,

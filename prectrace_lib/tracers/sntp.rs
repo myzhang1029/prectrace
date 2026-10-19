@@ -2,10 +2,13 @@ use crate::tracers::constants::L4PROTO_UDP;
 use crate::tracers::proto::{retain_icmp_errors_cvt_resp, udp};
 use crate::tracers::socket_utils::{raw as raw_socket, udp as udp_socket};
 use crate::tracers::{self, ResponseState};
-use ntp::formats::{Mode, ReferenceIdentifier, timestamp::TimestampFormat};
-use ntp::packet::Packet;
+use ntp_proto::protocol::{
+    ConstPackedSizeBytes, FromBytes, Mode, Packet, ShortFormat, TimestampFormat, ToBytes,
+};
+use serde::Serialize;
+use serde::ser::SerializeMap;
 use std::ffi::CStr;
-use std::io::{self, Cursor};
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,28 +16,13 @@ use tokio::net::UdpSocket;
 use tracing::trace;
 use zerocopy::TryFromBytes;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SntpInfo {
-    pub source: SocketAddr,
-    pub leap_indicator: u8,
-    pub version: u8,
-    pub mode: u8,
-    pub stratum: u8,
-    pub poll: i8,
-    pub precision: i8,
-    pub delay: u32,
-    pub dispersion: u32,
-    pub reference_identifier: ReferenceIdentifier,
-    pub reference_timestamp: TimestampFormat,
-    pub originate_timestamp: TimestampFormat,
-    pub receive_timestamp: TimestampFormat,
-    pub transmit_timestamp: TimestampFormat,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SntpInfo(Packet, SocketAddr);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Probe {
     hop: u8,
-    transmit_timestamp: u64,
+    transmit_timestamp: TimestampFormat,
     // unused in probe identification
     id: u32,
     source_port: u16,
@@ -68,11 +56,17 @@ impl tracers::Tracer for SntpTracer {
     #[tracing::instrument(level = "info", skip(self), fields(target = %self.target))]
     async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
         udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
-        let request = Packet::new_client();
-        let transmit_timestamp = u64::from(request.transmit_time);
-        let pkt: Vec<u8> = request.into();
+        let mut buf = [0u8; Packet::PACKED_SIZE_BYTES];
+        let transmit_timestamp = ntp_proto::unix_time::Instant::now().into();
+        let request = Packet {
+            transmit_timestamp,
+            ..Default::default()
+        };
+        request
+            .to_bytes(&mut buf)
+            .expect("bad buffer size (this is a bug!)");
         trace!("sending to {}", self.target);
-        self.socket.send_to(&pkt, self.target).await?;
+        self.socket.send_to(&buf, self.target).await?;
 
         Ok(Probe {
             hop: num_hops,
@@ -108,10 +102,10 @@ impl tracers::Tracer for SntpTracer {
     ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
         match packet {
             ReceivedPacket::Sntp(bytes) => {
-                let packet = parse_packet(bytes).ok()?;
+                let (packet, _size) = Packet::from_bytes(bytes).ok()?;
                 if source.ip() != self.target.ip()
                     || packet.mode != Mode::Server
-                    || u64::from(packet.orig_time) != probe.transmit_timestamp
+                    || packet.origin_timestamp != probe.transmit_timestamp
                 {
                     return None;
                 }
@@ -120,7 +114,7 @@ impl tracers::Tracer for SntpTracer {
                     source: Some(source),
                     received_time: Some(received_time),
                     state: ResponseState::Reached,
-                    additional_info: Some(sntp_info(packet, source)),
+                    additional_info: Some(SntpInfo(packet, source)),
                 })
             }
             ReceivedPacket::Icmp(bytes) => {
@@ -177,10 +171,10 @@ impl SntpTracer {
             // is all that they'll pass back to us. Otherwise, let's check
             // the Origin Timestamp to determine if the packet is ours like what we
             // do above for NTP responses
-            let Ok(pkt) = Packet::try_from(&udp_packet.data) else {
+            let Ok((pkt, _size)) = Packet::from_bytes(&udp_packet.data) else {
                 return false;
             };
-            u64::from(pkt.orig_time) == probe.transmit_timestamp
+            pkt.origin_timestamp == probe.transmit_timestamp
         };
         let state = retain_icmp_errors_cvt_resp(self.target.ip(), packet, L4PROTO_UDP, filter)?;
 
@@ -194,26 +188,33 @@ impl SntpTracer {
     }
 }
 
-fn parse_packet(bytes: &[u8]) -> io::Result<Packet> {
-    Packet::try_from(Cursor::new(bytes))
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+const fn ser_shortfmt(sf: ShortFormat) -> (u16, u16) {
+    (sf.seconds, sf.fraction)
+}
+const fn ser_tsfmt(ts: TimestampFormat) -> (u32, u32) {
+    (ts.seconds, ts.fraction)
 }
 
-fn sntp_info(packet: Packet, source: SocketAddr) -> SntpInfo {
-    SntpInfo {
-        source,
-        leap_indicator: packet.li as u8,
-        version: packet.vn as u8,
-        mode: packet.mode as u8,
-        stratum: packet.stratum.get_value(),
-        poll: packet.poll,
-        precision: packet.precision,
-        delay: packet.delay.into(),
-        dispersion: packet.dispersion.into(),
-        reference_identifier: packet.ref_id,
-        reference_timestamp: packet.ref_time,
-        originate_timestamp: packet.orig_time,
-        receive_timestamp: packet.recv_time,
-        transmit_timestamp: packet.transmit_time,
+impl Serialize for SntpInfo {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(14))?;
+        map.serialize_entry("source", &self.1)?;
+        map.serialize_entry("leap_indicator", &(self.0.leap_indicator as u8))?;
+        map.serialize_entry("version", &self.0.version.value())?;
+        map.serialize_entry("mode", &(self.0.mode as u8))?;
+        map.serialize_entry("stratum", &self.0.stratum.0)?;
+        map.serialize_entry("poll", &self.0.poll)?;
+        map.serialize_entry("precision", &self.0.precision)?;
+        map.serialize_entry("root_delay", &ser_shortfmt(self.0.root_delay))?;
+        map.serialize_entry("root_dispersion", &ser_shortfmt(self.0.root_dispersion))?;
+        map.serialize_entry("reference_id", &self.0.reference_id.as_bytes())?;
+        map.serialize_entry(
+            "reference_timestamp",
+            &ser_tsfmt(self.0.reference_timestamp),
+        )?;
+        map.serialize_entry("origin_timestamp", &ser_tsfmt(self.0.origin_timestamp))?;
+        map.serialize_entry("receive_timestamp", &ser_tsfmt(self.0.receive_timestamp))?;
+        map.serialize_entry("transmit_timestamp", &ser_tsfmt(self.0.transmit_timestamp))?;
+        map.end()
     }
 }

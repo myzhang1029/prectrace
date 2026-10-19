@@ -1,7 +1,8 @@
+use super::Output;
 use super::time_conversion::Converter;
-use super::{Output, SerializableInfo};
 use crate::tracers::{Probe, Response, Tracer};
 use chrono::SecondsFormat;
+use serde::Serialize;
 use serde_json::json;
 use std::io;
 
@@ -11,7 +12,7 @@ pub struct JsonOutput;
 impl<T> Output<T> for JsonOutput
 where
     T: Tracer,
-    T::AdditionalInfo: SerializableInfo,
+    T::AdditionalInfo: Serialize,
 {
     fn write(
         &mut self,
@@ -29,7 +30,7 @@ where
             "sent": sent_time.to_rfc3339_opts(SecondsFormat::AutoSi, true),
             "rtt_ms": response.rtt().map(|s| s.as_secs_f64()*1000.0),
             "id": response.probe().get_id(),
-            "additional_info": response.additional_info().map(SerializableInfo::json),
+            "additional_info": response.additional_info(),
             "trace_info": trace_info,
         });
         serde_json::to_writer(io::stdout().lock(), &value)
