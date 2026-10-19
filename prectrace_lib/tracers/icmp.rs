@@ -41,94 +41,6 @@ const fn get_icmp_param(id: u32) -> (u16, u16) {
     (identifier, sequence)
 }
 
-#[derive(Debug, Clone)]
-pub struct IcmpTracer {
-    socket: Arc<raw_socket::RawSocket>,
-    target: SocketAddr,
-}
-
-impl tracers::Tracer for IcmpTracer {
-    type Probe = Probe;
-    type ReceivedPacket = Vec<u8>;
-    type AdditionalInfo = ();
-
-    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
-        self.send_probe(num_hops, id).await
-    }
-
-    async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
-        self.receive_packet().await
-    }
-
-    fn match_probe_to_response(
-        &self,
-        probe: &Self::Probe,
-        packet: &Self::ReceivedPacket,
-        source: SocketAddr,
-        received_time: Instant,
-    ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
-        self.match_probe_to_response(probe, packet, source, received_time)
-    }
-
-    fn get_target(&self) -> Option<SocketAddr> {
-        Some(self.target)
-    }
-}
-
-impl IcmpTracer {
-    /// Create a new `IcmpTracer` for the given target IP address.
-    pub fn new(
-        target: IpAddr,
-        bind_address: Option<IpAddr>,
-        interface: Option<&CStr>,
-    ) -> io::Result<Self> {
-        Ok(Self {
-            socket: Arc::new(raw_socket::new(target.is_ipv4(), bind_address, interface)?),
-            target: SocketAddr::new(target, 0),
-        })
-    }
-
-    #[tracing::instrument(level = "info", skip(self), fields(target = %self.target))]
-    pub async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Probe> {
-        let (identifier, sequence) = get_icmp_param(id);
-        // All captured stuff are `Copy` so we make the closure once outside the loop
-        let sender = |sock: &AsyncFd<Socket>| {
-            // Don't create the packet until we know the socket is writable
-            // (I wonder how big this Future is..)
-            let inner = sock.get_ref();
-            if self.target.is_ipv4() {
-                let pkt = icmp4::IcmpEchoHeader::echo_request(identifier, sequence);
-                inner.set_ttl_v4(u32::from(num_hops))?;
-                inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
-            } else {
-                let pkt = icmp6::IcmpEchoHeader::echo_request(identifier, sequence);
-                inner.set_unicast_hops_v6(u32::from(num_hops))?;
-                inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
-            }
-            Ok(Instant::now())
-        };
-        let sent_time = loop {
-            let mut readiness = self.socket.writable().await?;
-            if let Ok(r) = readiness.try_io(sender) {
-                break r?;
-            }
-            // else WouldBlock
-        };
-        debug!("sent probe at {sent_time:?}");
-
-        Ok(Probe {
-            hop: num_hops,
-            id,
-            sent_time,
-        })
-    }
-
-    /// Wait until a packet is received on the socket and return the packet, peer address, and timestamp.
-    pub async fn receive_packet(&self) -> io::Result<(Vec<u8>, SocketAddr, Instant)> {
-        raw_socket::receive_packet(&self.socket).await
-    }
-}
-
 // See `IcmpTracer::classify` for what this macro is for.
 macro_rules! gen_classify_arms_for_proto {
     ($proto:ident, $matcher:ident, $probe:ident, $packet:ident) => {{
@@ -167,15 +79,64 @@ macro_rules! gen_classify_arms_for_proto {
     }};
 }
 
-impl IcmpTracer {
-    #[must_use]
-    pub fn match_probe_to_response(
+#[derive(Debug, Clone)]
+pub struct IcmpTracer {
+    socket: Arc<raw_socket::RawSocket>,
+    target: SocketAddr,
+}
+
+impl tracers::Tracer for IcmpTracer {
+    type Probe = Probe;
+    type ReceivedPacket = Vec<u8>;
+    type AdditionalInfo = ();
+
+    #[tracing::instrument(level = "info", skip(self), fields(target = %self.target))]
+    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
+        let (identifier, sequence) = get_icmp_param(id);
+        // All captured stuff are `Copy` so we make the closure once outside the loop
+        let sender = |sock: &AsyncFd<Socket>| {
+            // Don't create the packet until we know the socket is writable
+            // (I wonder how big this Future is..)
+            let inner = sock.get_ref();
+            if self.target.is_ipv4() {
+                let pkt = icmp4::IcmpEchoHeader::echo_request(identifier, sequence);
+                inner.set_ttl_v4(u32::from(num_hops))?;
+                inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
+            } else {
+                let pkt = icmp6::IcmpEchoHeader::echo_request(identifier, sequence);
+                inner.set_unicast_hops_v6(u32::from(num_hops))?;
+                inner.send_to(pkt.as_bytes(), &SockAddr::from(self.target))?;
+            }
+            Ok(Instant::now())
+        };
+        let sent_time = loop {
+            let mut readiness = self.socket.writable().await?;
+            if let Ok(r) = readiness.try_io(sender) {
+                break r?;
+            }
+            // else WouldBlock
+        };
+        debug!("sent probe at {sent_time:?}");
+
+        Ok(Probe {
+            hop: num_hops,
+            id,
+            sent_time,
+        })
+    }
+
+    /// Wait until a packet is received on the socket and return the packet, peer address, and timestamp.
+    async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
+        raw_socket::receive_packet(&self.socket).await
+    }
+
+    fn match_probe_to_response(
         &self,
-        probe: &Probe,
-        packet: &[u8],
+        probe: &Self::Probe,
+        packet: &Self::ReceivedPacket,
         source: SocketAddr,
         received_time: Instant,
-    ) -> Option<tracers::Response<Probe, ()>> {
+    ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
         let state = if self.target.is_ipv4() {
             gen_classify_arms_for_proto!(icmp4, matches_probe_v4, probe, packet)
         } else {
@@ -187,6 +148,24 @@ impl IcmpTracer {
             received_time: Some(received_time),
             state,
             additional_info: Some(()),
+        })
+    }
+
+    fn get_target(&self) -> Option<SocketAddr> {
+        Some(self.target)
+    }
+}
+
+impl IcmpTracer {
+    /// Create a new `IcmpTracer` for the given target IP address.
+    pub fn new(
+        target: IpAddr,
+        bind_address: Option<IpAddr>,
+        interface: Option<&CStr>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            socket: Arc::new(raw_socket::new(target.is_ipv4(), bind_address, interface)?),
+            target: SocketAddr::new(target, 0),
         })
     }
 }

@@ -140,6 +140,7 @@ pub trait Tracer: Send + Sync + 'static {
 
     /// Check that, if `packet` matches `probe`, return a completed `Response`. Otherwise,
     /// return `None`.
+    #[must_use]
     fn match_probe_to_response(
         &self,
         probe: &Self::Probe,
@@ -336,7 +337,12 @@ pub enum Traceroutes {
 }
 
 impl Traceroutes {
-    pub async fn new_icmp(target: IpAddr, config: Config<'_>) -> io::Result<Self> {
+    #[inline]
+    pub fn new_icmp(target: IpAddr, config: Config<'_>) -> impl Future<Output = io::Result<Self>> {
+        std::future::ready(Self::do_new_icmp(target, config))
+    }
+
+    fn do_new_icmp(target: IpAddr, config: Config<'_>) -> io::Result<Self> {
         let t = icmp::IcmpTracer::new(target, config.bind_address, config.bind_interface)?;
         Ok(Self::Icmp(Traceroute {
             tracer: Arc::new(t),

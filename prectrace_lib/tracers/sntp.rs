@@ -65,12 +65,38 @@ impl tracers::Tracer for SntpTracer {
     type ReceivedPacket = ReceivedPacket;
     type AdditionalInfo = SntpInfo;
 
+    #[tracing::instrument(level = "info", skip(self), fields(target = %self.target))]
     async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
-        self.send_probe(num_hops, id).await
+        udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
+        let request = Packet::new_client();
+        let transmit_timestamp = u64::from(request.transmit_time);
+        let pkt: Vec<u8> = request.into();
+        trace!("sending to {}", self.target);
+        self.socket.send_to(&pkt, self.target).await?;
+
+        Ok(Probe {
+            hop: num_hops,
+            transmit_timestamp,
+            id,
+            source_port: self.socket.local_addr()?.port(),
+            sent_time: Instant::now(),
+        })
     }
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
-        self.receive_packet().await
+        let mut bytes = [0u8; 4096];
+        tokio::select! {
+            biased;
+            result = self.socket.recv_from(&mut bytes) => {
+                let received_time = Instant::now();
+                let (length, source) = result?;
+                Ok((ReceivedPacket::Sntp(bytes[..length].to_vec()), source, received_time))
+            }
+            result = raw_socket::receive_packet(&self.icmp_socket) => {
+                let (packet, source, received_time) = result?;
+                Ok((ReceivedPacket::Icmp(packet), source, received_time))
+            }
+        }
     }
 
     fn match_probe_to_response(
@@ -80,7 +106,27 @@ impl tracers::Tracer for SntpTracer {
         source: SocketAddr,
         received_time: Instant,
     ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
-        self.match_probe_to_response(probe, packet, source, received_time)
+        match packet {
+            ReceivedPacket::Sntp(bytes) => {
+                let packet = parse_packet(bytes).ok()?;
+                if source.ip() != self.target.ip()
+                    || packet.mode != Mode::Server
+                    || u64::from(packet.orig_time) != probe.transmit_timestamp
+                {
+                    return None;
+                }
+                Some(tracers::Response {
+                    for_probe: *probe,
+                    source: Some(source),
+                    received_time: Some(received_time),
+                    state: ResponseState::Reached,
+                    additional_info: Some(sntp_info(packet, source)),
+                })
+            }
+            ReceivedPacket::Icmp(bytes) => {
+                self.match_icmp_error(probe, bytes, source, received_time)
+            }
+        }
     }
 
     fn get_target(&self) -> Option<SocketAddr> {
@@ -108,69 +154,6 @@ impl SntpTracer {
             icmp_socket: Arc::new(rawsock),
             target,
         })
-    }
-
-    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Probe> {
-        udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
-        let request = Packet::new_client();
-        let transmit_timestamp = u64::from(request.transmit_time);
-        let pkt: Vec<u8> = request.into();
-        trace!("sending to {}", self.target);
-        self.socket.send_to(&pkt, self.target).await?;
-
-        Ok(Probe {
-            hop: num_hops,
-            transmit_timestamp,
-            id,
-            source_port: self.socket.local_addr()?.port(),
-            sent_time: Instant::now(),
-        })
-    }
-
-    async fn receive_packet(&self) -> io::Result<(ReceivedPacket, SocketAddr, Instant)> {
-        let mut bytes = [0u8; 4096];
-        tokio::select! {
-            biased;
-            result = self.socket.recv_from(&mut bytes) => {
-                let received_time = Instant::now();
-                let (length, source) = result?;
-                Ok((ReceivedPacket::Sntp(bytes[..length].to_vec()), source, received_time))
-            }
-            result = raw_socket::receive_packet(&self.icmp_socket) => {
-                let (packet, source, received_time) = result?;
-                Ok((ReceivedPacket::Icmp(packet), source, received_time))
-            }
-        }
-    }
-
-    fn match_probe_to_response(
-        &self,
-        probe: &Probe,
-        packet: &ReceivedPacket,
-        source: SocketAddr,
-        received_time: Instant,
-    ) -> Option<tracers::Response<Probe, SntpInfo>> {
-        match packet {
-            ReceivedPacket::Sntp(bytes) => {
-                let packet = parse_packet(bytes).ok()?;
-                if source.ip() != self.target.ip()
-                    || packet.mode != Mode::Server
-                    || u64::from(packet.orig_time) != probe.transmit_timestamp
-                {
-                    return None;
-                }
-                Some(tracers::Response {
-                    for_probe: *probe,
-                    source: Some(source),
-                    received_time: Some(received_time),
-                    state: ResponseState::Reached,
-                    additional_info: Some(sntp_info(packet, source)),
-                })
-            }
-            ReceivedPacket::Icmp(bytes) => {
-                self.match_icmp_error(probe, bytes, source, received_time)
-            }
-        }
     }
 
     fn match_icmp_error(

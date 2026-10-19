@@ -62,12 +62,43 @@ impl tracers::Tracer for DnsTracer {
     type ReceivedPacket = ReceivedPacket;
     type AdditionalInfo = Message;
 
+    #[tracing::instrument(level = "info", skip(self), fields(target = %self.target))]
     async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
-        self.send_probe(num_hops, id).await
+        let dns_id = get_dns_id(id);
+        let mut message = Message::new(dns_id, MessageType::Query, OpCode::Query);
+        message.add_query(self.query.clone());
+
+        let mut bytes = Vec::with_capacity(512);
+        let mut encoder = BinEncoder::new(&mut bytes);
+        message.emit(&mut encoder).map_err(protocol_error)?;
+
+        udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
+        trace!("sending to {}", self.target);
+        self.socket.send_to(&bytes, self.target).await?;
+
+        Ok(Probe {
+            hop: num_hops,
+            id,
+            source_port: self.socket.local_addr()?.port(),
+            sent_time: Instant::now(),
+        })
     }
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
-        self.receive_packet().await
+        let mut dns_bytes = [0u8; 4096];
+        tokio::select! {
+            biased;
+            result = self.socket.recv_from(&mut dns_bytes) => {
+                let time = Instant::now();
+                let (length, source) = result?;
+                let message = Message::from_vec(&dns_bytes[..length]).map_err(protocol_error)?;
+                Ok((ReceivedPacket::Dns(message), source, time))
+            }
+            result = raw_socket::receive_packet(&self.icmp_socket) => {
+                let (packet, source, received_time) = result?;
+                Ok((ReceivedPacket::Icmp(packet), source, received_time))
+            }
+        }
     }
 
     fn match_probe_to_response(
@@ -77,7 +108,28 @@ impl tracers::Tracer for DnsTracer {
         source: SocketAddr,
         received_time: Instant,
     ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
-        self.match_probe_to_response(probe, packet, source, received_time)
+        match packet {
+            ReceivedPacket::Dns(packet)
+                if packet.id == get_dns_id(probe.id) && source.ip() == self.target.ip() =>
+            {
+                if packet.message_type == MessageType::Response {
+                    Some(tracers::Response {
+                        for_probe: *probe,
+                        source: Some(source),
+                        received_time: Some(received_time),
+                        state: ResponseState::Reached,
+                        additional_info: Some(packet.clone()),
+                    })
+                } else {
+                    info!("Received a `Query` from the destination??");
+                    None
+                }
+            }
+            ReceivedPacket::Dns(_) => None,
+            ReceivedPacket::Icmp(packet) => {
+                self.match_icmp_error(probe, packet, source, received_time)
+            }
+        }
     }
 
     fn get_target(&self) -> Option<SocketAddr> {
@@ -101,75 +153,6 @@ impl DnsTracer {
             target,
             query,
         })
-    }
-
-    async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Probe> {
-        let dns_id = get_dns_id(id);
-        let mut message = Message::new(dns_id, MessageType::Query, OpCode::Query);
-        message.add_query(self.query.clone());
-
-        let mut bytes = Vec::with_capacity(512);
-        let mut encoder = BinEncoder::new(&mut bytes);
-        message.emit(&mut encoder).map_err(protocol_error)?;
-
-        udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
-        trace!("sending to {}", self.target);
-        self.socket.send_to(&bytes, self.target).await?;
-
-        Ok(Probe {
-            hop: num_hops,
-            id,
-            source_port: self.socket.local_addr()?.port(),
-            sent_time: Instant::now(),
-        })
-    }
-
-    async fn receive_packet(&self) -> io::Result<(ReceivedPacket, SocketAddr, Instant)> {
-        let mut dns_bytes = [0u8; 4096];
-        tokio::select! {
-            biased;
-            result = self.socket.recv_from(&mut dns_bytes) => {
-                let time = Instant::now();
-                let (length, source) = result?;
-                let message = Message::from_vec(&dns_bytes[..length]).map_err(protocol_error)?;
-                Ok((ReceivedPacket::Dns(message), source, time))
-            }
-            result = raw_socket::receive_packet(&self.icmp_socket) => {
-                let (packet, source, received_time) = result?;
-                Ok((ReceivedPacket::Icmp(packet), source, received_time))
-            }
-        }
-    }
-
-    fn match_probe_to_response(
-        &self,
-        probe: &Probe,
-        packet: &ReceivedPacket,
-        source: SocketAddr,
-        received_time: Instant,
-    ) -> Option<tracers::Response<Probe, Message>> {
-        match packet {
-            ReceivedPacket::Dns(packet)
-                if packet.id == get_dns_id(probe.id) && source.ip() == self.target.ip() =>
-            {
-                if packet.message_type == MessageType::Response {
-                    Some(tracers::Response {
-                        for_probe: *probe,
-                        source: Some(source),
-                        received_time: Some(received_time),
-                        state: ResponseState::Reached,
-                        additional_info: Some(packet.clone()),
-                    })
-                } else {
-                    info!("Received a `Query` from the destination??");
-                    None
-                }
-            }
-            ReceivedPacket::Dns(_) => None,
-            ReceivedPacket::Icmp(packet) => {
-                self.match_icmp_error(probe, packet, source, received_time)
-            }
-        }
     }
 
     fn match_icmp_error(
