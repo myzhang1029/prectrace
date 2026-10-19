@@ -13,7 +13,11 @@ where
     T: Tracer,
     T::AdditionalInfo: SerializableInfo,
 {
-    fn write(&mut self, response: &Response<T::Probe, T::AdditionalInfo>) -> io::Result<()> {
+    fn write(
+        &mut self,
+        response: &Response<T::Probe, T::AdditionalInfo>,
+        trace_info: serde_json::Value,
+    ) -> io::Result<()> {
         let converter = Converter::init_or_get_global();
         let sent_time = converter
             .instant_datetime(response.sent_time())
@@ -25,6 +29,7 @@ where
             "sent": sent_time.to_rfc3339_opts(SecondsFormat::AutoSi, true),
             "rtt_ms": response.rtt().map(|s| s.as_secs_f64()*1000.0),
             "additional_info": response.additional_info().map(SerializableInfo::json),
+            "trace_info": trace_info,
         });
         serde_json::to_writer(io::stdout().lock(), &value)
             .map_err(|error| io::Error::other(error.to_string()))?;

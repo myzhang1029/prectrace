@@ -71,6 +71,10 @@ impl tracers::Tracer for DnsTracer {
     ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
         self.match_probe_to_response(probe, packet, source, received_time)
     }
+
+    fn get_target(&self) -> Option<SocketAddr> {
+        Some(self.target)
+    }
 }
 
 impl DnsTracer {

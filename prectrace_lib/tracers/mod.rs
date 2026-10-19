@@ -145,6 +145,9 @@ pub trait Tracer: Send + Sync + 'static {
         source: SocketAddr,
         received_time: Instant,
     ) -> Option<Response<Self::Probe, Self::AdditionalInfo>>;
+
+    /// If known, return the target of the trace.
+    fn get_target(&self) -> Option<SocketAddr>;
 }
 
 trait TracerExt: Tracer {
@@ -247,10 +250,10 @@ impl<T: Tracer> TracerExt for T {}
 #[derive(Debug, Clone)]
 pub struct Traceroute<T: Tracer> {
     tracer: Arc<T>,
-    pub cycle_interval: Duration,
-    pub min_send_spacing: Duration,
-    pub timeout: Duration,
-    pub initial_max_hops: u8,
+    cycle_interval: Duration,
+    min_send_spacing: Duration,
+    timeout: Duration,
+    max_hops: Arc<AtomicU8>,
 }
 
 impl<T: Tracer + Clone> Traceroute<T> {
@@ -264,12 +267,11 @@ impl<T: Tracer + Clone> Traceroute<T> {
     {
         let (probe_tx, probe_rx) = mpsc::channel(CHAN_SIZE);
         let (record_tx, mut record_rx) = mpsc::unbounded_channel();
-        let active_hops = Arc::new(AtomicU8::new(self.initial_max_hops));
 
-        let sender_active_hops = active_hops.clone();
-        let st = self.tracer.clone();
+        let sender_active_hops = self.max_hops.clone();
+        let tracer = self.tracer.clone();
         tokio::spawn(async move {
-            if let Err(e) = st
+            if let Err(e) = tracer
                 .send_worker(
                     self.cycle_interval,
                     self.min_send_spacing,
@@ -282,10 +284,11 @@ impl<T: Tracer + Clone> Traceroute<T> {
             }
         });
 
-        let receiver_active_hops = active_hops;
+        let receiver_active_hops = self.max_hops.clone();
+        let tracer = self.tracer.clone();
         tokio::spawn(async move {
-            if let Err(e) = self
-                .tracer
+            if let Err(e) = tracer
+                .clone()
                 .receive_worker(self.timeout, receiver_active_hops, probe_rx, record_tx)
                 .await
             {
@@ -294,11 +297,22 @@ impl<T: Tracer + Clone> Traceroute<T> {
         });
 
         while let Some(record) = record_rx.recv().await {
-            output.write(&record)?;
+            output.write(&record, self.export_config())?;
         }
 
         // We always hold one `record_tx`, so `record_rx.recv` will never return `None``
         unreachable!()
+    }
+
+    fn export_config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "target": self.tracer.get_target(),
+            "type": std::any::type_name::<T>(),
+            "cycle_interval": self.cycle_interval,
+            "min_send_spacing": self.min_send_spacing,
+            "timeout": self.timeout,
+            "current_max_hops": self.max_hops.load(Ordering::Relaxed),
+        })
     }
 }
 
@@ -327,7 +341,7 @@ impl Traceroutes {
             cycle_interval: config.cycle_interval,
             min_send_spacing: config.min_send_spacing,
             timeout: config.timeout,
-            initial_max_hops: config.initial_max_hops,
+            max_hops: Arc::new(AtomicU8::new(config.initial_max_hops)),
         }))
     }
     pub async fn new_dns(
@@ -342,7 +356,7 @@ impl Traceroutes {
             cycle_interval: config.cycle_interval,
             min_send_spacing: config.min_send_spacing,
             timeout: config.timeout,
-            initial_max_hops: config.initial_max_hops,
+            max_hops: Arc::new(AtomicU8::new(config.initial_max_hops)),
         }))
     }
     pub async fn new_sntp(target: SocketAddr, config: Config<'_>) -> io::Result<Self> {
@@ -352,7 +366,7 @@ impl Traceroutes {
             cycle_interval: config.cycle_interval,
             min_send_spacing: config.min_send_spacing,
             timeout: config.timeout,
-            initial_max_hops: config.initial_max_hops,
+            max_hops: Arc::new(AtomicU8::new(config.initial_max_hops)),
         }))
     }
 }

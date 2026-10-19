@@ -7,7 +7,11 @@ use std::io;
 pub struct TextOutput;
 
 impl<T: Tracer> Output<T> for TextOutput {
-    fn write(&mut self, response: &Response<T::Probe, T::AdditionalInfo>) -> io::Result<()> {
+    fn write(
+        &mut self,
+        response: &Response<T::Probe, T::AdditionalInfo>,
+        trace_info: serde_json::Value,
+    ) -> io::Result<()> {
         let converter = Converter::init_or_get_global();
         let sent_time = converter
             .instant_datetime(response.sent_time())
@@ -20,13 +24,14 @@ impl<T: Tracer> Output<T> for TextOutput {
             },
         );
         println!(
-            "{:<3} {:<30} {:?}\trtt {rtt}\tsent {}",
+            "{:<3} {:<30} {:?}\trtt {rtt}\tsent {}\tdistance {}",
             response.probe().get_num_hops(),
             response
                 .source()
                 .map_or_else(|| String::from("???"), |s| s.to_string()),
             response.state(),
             sent_time.naive_local().format("%Y-%m-%d %H:%M:%S%.f"),
+            trace_info.get("current_max_hops").unwrap_or_default()
         );
         Ok(())
     }

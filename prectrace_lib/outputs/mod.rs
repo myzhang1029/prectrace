@@ -14,7 +14,11 @@ pub trait SerializableInfo {
 }
 
 pub trait Output<T: Tracer> {
-    fn write(&mut self, response: &Response<T::Probe, T::AdditionalInfo>) -> io::Result<()>;
+    fn write(
+        &mut self,
+        response: &Response<T::Probe, T::AdditionalInfo>,
+        trace_info: serde_json::Value,
+    ) -> io::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -28,10 +32,14 @@ where
     T: Tracer,
     T::AdditionalInfo: SerializableInfo,
 {
-    fn write(&mut self, response: &Response<T::Probe, T::AdditionalInfo>) -> io::Result<()> {
+    fn write(
+        &mut self,
+        response: &Response<T::Probe, T::AdditionalInfo>,
+        trace_info: serde_json::Value,
+    ) -> io::Result<()> {
         match self {
-            Self::Json => <JsonOutput as Output<T>>::write(&mut JsonOutput, response),
-            Self::Text => <TextOutput as Output<T>>::write(&mut TextOutput, response),
+            Self::Json => <JsonOutput as Output<T>>::write(&mut JsonOutput, response, trace_info),
+            Self::Text => <TextOutput as Output<T>>::write(&mut TextOutput, response, trace_info),
         }
     }
 }
