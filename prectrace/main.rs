@@ -6,15 +6,13 @@
 mod args;
 mod resolution;
 
-use anyhow::Context;
 use clap::Parser;
-use prectrace_lib::outputs::OutputKind;
-use prectrace_lib::tracers::{self, TraceConfig};
+use prectrace_lib::tracers::{Config as TraceConfig, Traceroutes};
 use tokio::task::JoinSet;
-use tracing::trace;
+use tracing::{error, trace};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::args::{Cli, OutputFormat, TraceSpec};
+use crate::args::{Cli, TraceSpec};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,42 +41,25 @@ async fn main() -> anyhow::Result<()> {
 
     let mut traces = Vec::new();
 
-    for spec in cli.icmp {
+    for spec in &cli.icmp {
         let target =
             resolution::resolve_destination(&spec.destination, 0, cli.ipv4, cli.ipv6).await?;
-        let tracer =
-            tracers::icmp::IcmpTracer::new(target.ip(), cli.address, cli.interface.as_deref())?;
-        traces.push(PreparedTrace::Icmp {
-            tracer,
-            config: trace_config(&spec, cli.timeout, cli.max_hops),
-        });
+        let config = make_trace_config(spec, &cli);
+        traces.push(Traceroutes::new_icmp(target.ip(), config).await?);
     }
 
-    for spec in cli.dns {
+    for spec in &cli.dns {
         let target =
             resolution::resolve_destination(&spec.destination, 53, cli.ipv4, cli.ipv6).await?;
-        let tracer = tracers::dns::DnsTracer::new(
-            target,
-            cli.dns_query.clone(),
-            cli.address,
-            cli.interface.as_deref(),
-        )
-        .await?;
-        traces.push(PreparedTrace::Dns {
-            tracer,
-            config: trace_config(&spec, cli.timeout, cli.max_hops),
-        });
+        let config = make_trace_config(spec, &cli);
+        traces.push(Traceroutes::new_dns(target, cli.dns_query.clone(), config).await?);
     }
 
-    for spec in cli.sntp {
+    for spec in &cli.sntp {
         let target =
             resolution::resolve_destination(&spec.destination, 123, cli.ipv4, cli.ipv6).await?;
-        let tracer =
-            tracers::sntp::SntpTracer::new(target, cli.address, cli.interface.as_deref()).await?;
-        traces.push(PreparedTrace::Sntp {
-            tracer,
-            config: trace_config(&spec, cli.timeout, cli.max_hops),
-        });
+        let config = make_trace_config(spec, &cli);
+        traces.push(Traceroutes::new_sntp(target, config).await?);
     }
 
     if traces.is_empty() {
@@ -86,67 +67,33 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut tasks = JoinSet::new();
-    let output = cli.output;
+
     for trace in traces {
         tasks.spawn(async move {
             trace!("spawned {trace:?}");
             match trace {
-                PreparedTrace::Icmp { tracer, config } => {
-                    run_trace(tracer, config, output).await?;
-                }
-                PreparedTrace::Dns { tracer, config } => {
-                    run_trace(tracer, config, output).await?;
-                }
-                PreparedTrace::Sntp { tracer, config } => {
-                    run_trace(tracer, config, output).await?;
-                }
+                Traceroutes::Icmp(t) => t.run_with_output(cli.output).await,
+                Traceroutes::Dns(t) => t.run_with_output(cli.output).await,
+                Traceroutes::Sntp(t) => t.run_with_output(cli.output).await,
             }
-
-            Ok::<(), std::io::Error>(())
         });
     }
-
     while let Some(result) = tasks.join_next().await {
-        result.context("trace task failed")??;
+        let e = result
+            .expect("Tracer panicked (this is a bug!)")
+            .unwrap_err();
+        error!("Tracer errored: {e:?}");
     }
     Ok(())
 }
 
-async fn run_trace<T>(tracer: T, config: TraceConfig, output: OutputFormat) -> std::io::Result<()>
-where
-    T: tracers::Tracer,
-    T::AdditionalInfo: prectrace_lib::outputs::SerializableInfo,
-{
-    let output = match output {
-        OutputFormat::Json => OutputKind::Json,
-        OutputFormat::Text => OutputKind::Text,
-    };
-    tracers::Traceroute::new(tracer, config)
-        .run_with_output(output)
-        .await
-}
-
-#[derive(Debug, Clone)]
-enum PreparedTrace {
-    Icmp {
-        tracer: tracers::icmp::IcmpTracer,
-        config: TraceConfig,
-    },
-    Dns {
-        tracer: tracers::dns::DnsTracer,
-        config: TraceConfig,
-    },
-    Sntp {
-        tracer: tracers::sntp::SntpTracer,
-        config: TraceConfig,
-    },
-}
-
-const fn trace_config(spec: &TraceSpec, timeout: std::time::Duration, max_hops: u8) -> TraceConfig {
+fn make_trace_config<'a>(spec: &TraceSpec, cli: &'a Cli) -> TraceConfig<'a> {
     TraceConfig {
+        initial_max_hops: cli.max_hops,
         cycle_interval: spec.interval,
         min_send_spacing: spec.spacing,
-        timeout,
-        max_hops,
+        timeout: cli.timeout,
+        bind_address: cli.address,
+        bind_interface: cli.interface.as_deref(),
     }
 }

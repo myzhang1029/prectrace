@@ -6,8 +6,9 @@ pub mod sntp;
 pub(crate) mod socket_utils;
 
 use std::collections::VecDeque;
+use std::ffi::CStr;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -34,14 +35,6 @@ impl ResponseState {
     pub const fn is_terminal(&self) -> bool {
         !self.is_on_the_way()
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TraceConfig {
-    pub cycle_interval: Duration,
-    pub min_send_spacing: Duration,
-    pub timeout: Duration,
-    pub max_hops: u8,
 }
 
 /// A [`Response`] is constructed for each received packet that matches a [`Probe`] we sent out.
@@ -157,7 +150,8 @@ pub trait Tracer: Send + Sync + 'static {
 trait TracerExt: Tracer {
     async fn send_worker(
         self: Arc<Self>,
-        config: TraceConfig,
+        cycle_interval: Duration,
+        min_send_spacing: Duration,
         active_hops: Arc<AtomicU8>,
         probe_tx: mpsc::Sender<Self::Probe>,
     ) -> io::Result<()> {
@@ -169,7 +163,7 @@ trait TracerExt: Tracer {
             let mut hop = 1;
             while hop <= cycle_limit {
                 if let Some(sent_at) = last_send {
-                    let spacing = config.min_send_spacing.saturating_sub(sent_at.elapsed());
+                    let spacing = min_send_spacing.saturating_sub(sent_at.elapsed());
                     if !spacing.is_zero() {
                         tokio::time::sleep(spacing).await;
                     }
@@ -188,13 +182,13 @@ trait TracerExt: Tracer {
                     break;
                 }
             }
-            tokio::time::sleep(config.cycle_interval).await;
+            tokio::time::sleep(cycle_interval).await;
         }
     }
 
     async fn receive_worker(
         self: Arc<Self>,
-        config: TraceConfig,
+        timeout: Duration,
         active_hops: Arc<AtomicU8>,
         mut probe_rx: mpsc::Receiver<Self::Probe>,
         record_tx: mpsc::UnboundedSender<Response<Self::Probe, Self::AdditionalInfo>>,
@@ -227,7 +221,7 @@ trait TracerExt: Tracer {
                 _ = cleanup.tick() => {
                     let now = Instant::now();
                     pending.retain(|probe| {
-                        if now.duration_since(probe.get_sent_time()) > config.timeout {
+                        if now.duration_since(probe.get_sent_time()) > timeout {
                             let lost_resp = Response {
                                 for_probe: probe.clone(),
                                 source: None,
@@ -250,49 +244,49 @@ trait TracerExt: Tracer {
 
 impl<T: Tracer> TracerExt for T {}
 
-pub struct Traceroute<T> {
+#[derive(Debug, Clone)]
+pub struct Traceroute<T: Tracer> {
     tracer: Arc<T>,
-    config: TraceConfig,
+    pub cycle_interval: Duration,
+    pub min_send_spacing: Duration,
+    pub timeout: Duration,
+    pub initial_max_hops: u8,
 }
 
-impl<T: Tracer> Traceroute<T> {
-    pub fn new(tracer: T, config: TraceConfig) -> Self {
-        Self {
-            tracer: Arc::new(tracer),
-            config,
-        }
-    }
-
-    pub async fn run(self) -> io::Result<()> {
+impl<T: Tracer + Clone> Traceroute<T> {
+    pub async fn run(self) -> io::Result<!> {
         self.run_with_output(crate::outputs::TextOutput).await
     }
 
-    pub async fn run_with_output<O>(self, mut output: O) -> io::Result<()>
+    pub async fn run_with_output<O>(self, mut output: O) -> io::Result<!>
     where
         O: crate::outputs::Output<T>,
     {
         let (probe_tx, probe_rx) = mpsc::channel(CHAN_SIZE);
         let (record_tx, mut record_rx) = mpsc::unbounded_channel();
-        let active_hops = Arc::new(AtomicU8::new(self.config.max_hops));
+        let active_hops = Arc::new(AtomicU8::new(self.initial_max_hops));
 
-        let sender_config = self.config;
         let sender_active_hops = active_hops.clone();
         let st = self.tracer.clone();
         tokio::spawn(async move {
             if let Err(e) = st
-                .send_worker(sender_config, sender_active_hops, probe_tx)
+                .send_worker(
+                    self.cycle_interval,
+                    self.min_send_spacing,
+                    sender_active_hops,
+                    probe_tx,
+                )
                 .await
             {
                 error!("Sender failed: {e}");
             }
         });
 
-        let receiver_config = self.config;
         let receiver_active_hops = active_hops;
         tokio::spawn(async move {
             if let Err(e) = self
                 .tracer
-                .receive_worker(receiver_config, receiver_active_hops, probe_rx, record_tx)
+                .receive_worker(self.timeout, receiver_active_hops, probe_rx, record_tx)
                 .await
             {
                 error!("Receiver failed: {e}");
@@ -303,6 +297,62 @@ impl<T: Tracer> Traceroute<T> {
             output.write(&record)?;
         }
 
-        Ok(())
+        // We always hold one `record_tx`, so `record_rx.recv` will never return `None``
+        unreachable!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Config<'a> {
+    pub initial_max_hops: u8,
+    pub cycle_interval: Duration,
+    pub min_send_spacing: Duration,
+    pub timeout: Duration,
+    pub bind_address: Option<IpAddr>,
+    pub bind_interface: Option<&'a CStr>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Traceroutes {
+    Icmp(Traceroute<icmp::IcmpTracer>),
+    Dns(Traceroute<dns::DnsTracer>),
+    Sntp(Traceroute<sntp::SntpTracer>),
+}
+
+impl Traceroutes {
+    pub async fn new_icmp(target: IpAddr, config: Config<'_>) -> io::Result<Self> {
+        let t = icmp::IcmpTracer::new(target, config.bind_address, config.bind_interface)?;
+        Ok(Self::Icmp(Traceroute {
+            tracer: Arc::new(t),
+            cycle_interval: config.cycle_interval,
+            min_send_spacing: config.min_send_spacing,
+            timeout: config.timeout,
+            initial_max_hops: config.initial_max_hops,
+        }))
+    }
+    pub async fn new_dns(
+        target: SocketAddr,
+        query: hickory_proto::op::Query,
+        config: Config<'_>,
+    ) -> io::Result<Self> {
+        let t =
+            dns::DnsTracer::new(target, query, config.bind_address, config.bind_interface).await?;
+        Ok(Self::Dns(Traceroute {
+            tracer: Arc::new(t),
+            cycle_interval: config.cycle_interval,
+            min_send_spacing: config.min_send_spacing,
+            timeout: config.timeout,
+            initial_max_hops: config.initial_max_hops,
+        }))
+    }
+    pub async fn new_sntp(target: SocketAddr, config: Config<'_>) -> io::Result<Self> {
+        let t = sntp::SntpTracer::new(target, config.bind_address, config.bind_interface).await?;
+        Ok(Self::Sntp(Traceroute {
+            tracer: Arc::new(t),
+            cycle_interval: config.cycle_interval,
+            min_send_spacing: config.min_send_spacing,
+            timeout: config.timeout,
+            initial_max_hops: config.initial_max_hops,
+        }))
     }
 }

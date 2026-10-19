@@ -17,7 +17,7 @@ pub trait Output<T: Tracer> {
     fn write(&mut self, response: &Response<T::Probe, T::AdditionalInfo>) -> io::Result<()>;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum OutputKind {
     Json,
     Text,
