@@ -158,6 +158,10 @@ impl tracers::Tracer for IcmpTracer {
 
 impl IcmpTracer {
     /// Create a new `IcmpTracer` for the given target IP address.
+    ///
+    /// # Errors
+    ///
+    /// If the required raw socket cannot be created or bound.
     pub fn new(
         target: IpAddr,
         bind_address: Option<IpAddr>,

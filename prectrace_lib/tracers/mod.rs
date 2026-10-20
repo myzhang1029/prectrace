@@ -287,10 +287,27 @@ pub struct Traceroute<T: Tracer> {
 }
 
 impl<T: Tracer + Clone> Traceroute<T> {
+    /// Run traceroutes with the
+    /// [`TextOutput`](crate::outputs::TextOutput) output format.
+    ///
+    /// # Errors
+    ///
+    /// See [`run_with_output`](Self::run_with_output).
     pub async fn run(self) -> io::Result<!> {
         self.run_with_output(crate::outputs::TextOutput).await
     }
 
+    /// Indefinitely run traceroutes until an error occors.
+    ///
+    /// # Errors
+    ///
+    /// - IO Error: if a fatal IO error occurs in any trace.
+    /// - Output error: if one of the `output` runs results in a fatal error.
+    ///
+    /// # Panics
+    ///
+    /// If the inner worker panics, which are likely from one of the [`Tracer`]
+    /// trait's functions.
     pub async fn run_with_output<O>(self, mut output: O) -> io::Result<!>
     where
         O: crate::outputs::Output<T>,
@@ -316,7 +333,7 @@ impl<T: Tracer + Clone> Traceroute<T> {
         ));
         loop {
             tokio::select! {
-                Some(record) = record_rx.recv() => output.write(&record, self.export_config()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+                Some(record) = record_rx.recv() => output.write(&record, self.export_config()).map_err(io::Error::other)?,
                 Some(r) = tasks.join_next() => r.expect("sender panicked (this is a bug)")?,
             }
         }
@@ -355,6 +372,11 @@ pub enum Traceroutes {
 }
 
 impl Traceroutes {
+    /// Create an ICMP tracer.
+    ///
+    /// # Errors
+    ///
+    /// If the required raw socket cannot be created or bound.
     #[inline]
     pub fn new_icmp(target: IpAddr, config: Config<'_>) -> impl Future<Output = io::Result<Self>> {
         std::future::ready(Self::do_new_icmp(target, config))
@@ -372,6 +394,11 @@ impl Traceroutes {
             max_hops: config.max_hops,
         }))
     }
+    /// Create a DNS tracer, sending `query` to the target.
+    ///
+    /// # Errors
+    ///
+    /// If the required UDP and raw sockets cannot be created or bound.
     pub async fn new_dns(
         target: SocketAddr,
         query: hickory_proto::op::Query,
@@ -389,6 +416,11 @@ impl Traceroutes {
             max_hops: config.max_hops,
         }))
     }
+    /// Create a SNTP tracer.
+    ///
+    /// # Errors
+    ///
+    /// If the required UDP and raw sockets cannot be created or bound.
     pub async fn new_sntp(target: SocketAddr, config: Config<'_>) -> io::Result<Self> {
         let t = sntp::SntpTracer::new(target, config.bind_address, config.bind_interface).await?;
         Ok(Self::Sntp(Traceroute {

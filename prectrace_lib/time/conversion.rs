@@ -20,6 +20,11 @@ pub struct Converter {
 }
 
 impl Converter {
+    /// Create a new [`Instant`]-to-unix converter
+    ///
+    /// # Panics
+    ///
+    /// If the time difference between "now" and the unix epoch cannot be expressed as a [`Duration`](std::time::Duration).
     pub fn new() -> Self {
         let st_epoch = SystemTime::UNIX_EPOCH;
         let st_now = SystemTime::now();

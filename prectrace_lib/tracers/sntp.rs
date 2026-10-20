@@ -145,6 +145,10 @@ pub enum ReceivedPacket {
 
 impl SntpTracer {
     /// Creates an SNTP tracer that sends requests to UDP port 123.
+    ///
+    /// # Errors
+    ///
+    /// If the required UDP and raw sockets cannot be created or bound.
     pub async fn new(
         target: SocketAddr,
         bind_address: Option<IpAddr>,

@@ -144,6 +144,10 @@ impl tracers::Tracer for DnsTracer {
 
 impl DnsTracer {
     /// Create a tracer for `query`, sending it to `target` over UDP
+    ///
+    /// # Errors
+    ///
+    /// If the required UDP and raw sockets cannot be created or bound.
     pub async fn new(
         target: SocketAddr,
         query: Query,
