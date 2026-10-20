@@ -1,3 +1,5 @@
+#![expect(clippy::empty_enums, reason = "spurious lint due to zerocopy_derive::TryFromBytes")]
+
 use super::common::{Error, convert_error};
 use crate::tracers::{self, constants::L4PROTO_ICMP6};
 use std::net::Ipv6Addr;
@@ -25,16 +27,9 @@ pub struct IpHeader {
     pub destination_ip: [u8; 16],
 }
 
-#[allow(dead_code)]
 impl IpHeader {
     pub const fn version(&self) -> u8 {
         self.version_traffic_class_flow_label[0] >> 4
-    }
-    pub const fn payload_length(&self) -> u16 {
-        u16::from_be_bytes(self.payload_length)
-    }
-    pub const fn source_ip(&self) -> Ipv6Addr {
-        Ipv6Addr::from_octets(self.source_ip)
     }
     pub const fn destination_ip(&self) -> Ipv6Addr {
         Ipv6Addr::from_octets(self.destination_ip)
@@ -66,7 +61,7 @@ impl IpHeader {
     Hash,
 )]
 #[repr(u8)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "spurious lint due to zerocopy")]
 pub enum IcmpType {
     DestinationUnreachable = 1,
     TimeExceeded = 3,
@@ -111,6 +106,7 @@ pub struct IcmpEchoHeader {
     pub identifier: [u8; 2],
     pub sequence: [u8; 2],
 }
+
 
 #[derive(
     zerocopy_derive::TryFromBytes,

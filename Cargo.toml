@@ -1,7 +1,13 @@
 [package]
 name = "prectrace"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Traceroute with augmented information from the application layer"
+readme = true
+repository = "https://github.com/myzhang1029/prectrace"
+license = "Apache-2.0"
+keywords = ["traceroute", "network", "icmp", "sntp", "ntp", "dns"]
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "prectrace"

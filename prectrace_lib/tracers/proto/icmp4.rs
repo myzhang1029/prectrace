@@ -6,6 +6,8 @@
 //! header does not include the `IPv[46]` header. This is because `socket2`'s API
 //! will create its own L3 header.
 
+#![expect(clippy::empty_enums, reason = "spurious lint due to zerocopy_derive::TryFromBytes")]
+
 use super::common::{Error, convert_error};
 use crate::tracers::{self, constants::L4PROTO_ICMP};
 use std::net::Ipv4Addr;
@@ -38,7 +40,7 @@ fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation, reason = "protocol requirement")]
     !(sum as u16)
 }
 
@@ -58,7 +60,7 @@ fn checksum(packet: &[u8], mut additional_data: &[u8]) -> u16 {
     Hash,
 )]
 #[repr(u8)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "spurious lint due to zerocopy")]
 pub enum IcmpType {
     EchoReply = 0,
     DestinationUnreachable = 3,
@@ -91,34 +93,12 @@ pub struct IpHeader {
     pub destination_ip: [u8; 4],
 }
 
-#[allow(dead_code)]
 impl IpHeader {
     pub const fn version(&self) -> u8 {
         self.version_ihl >> 4
     }
     pub const fn ihl(&self) -> u8 {
         self.version_ihl & 0x0f
-    }
-    pub const fn dscp(&self) -> u8 {
-        self.dscp_ecn >> 2
-    }
-    pub const fn ecn(&self) -> u8 {
-        self.dscp_ecn & 0x03
-    }
-    pub const fn total_length(&self) -> u16 {
-        u16::from_be_bytes(self.total_length)
-    }
-    pub const fn identification(&self) -> u16 {
-        u16::from_be_bytes(self.identification)
-    }
-    pub const fn flags(&self) -> u8 {
-        self.flags_fragment_offset[0] >> 5
-    }
-    pub const fn fragment_offset(&self) -> u16 {
-        u16::from_be_bytes(self.flags_fragment_offset) & 0x1fff
-    }
-    pub const fn source_ip(&self) -> Ipv4Addr {
-        Ipv4Addr::from_octets(self.source_ip)
     }
     pub const fn destination_ip(&self) -> Ipv4Addr {
         Ipv4Addr::from_octets(self.destination_ip)

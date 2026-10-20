@@ -20,7 +20,7 @@ pub enum Error {
 
 /// Convert a [`TryCastError`] into an owned type to get rid of the lifetime parameter
 /// and implement [`std::error::Error`].
-#[allow(
+#[expect(
     clippy::needless_pass_by_value,
     reason = "intended to be used in `map_err"
 )]
