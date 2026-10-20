@@ -54,7 +54,8 @@ pub fn bind_interface(socket: &Socket, is_v4: bool, interface: &CStr) -> io::Res
     let ptr = interface.as_ptr();
     // SAFETY: just a normal C FFI call.
     let ifidx = unsafe { libc::if_nametoindex(ptr) };
-    let ifidx = std::num::NonZeroU32::try_from(ifidx).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let ifidx = std::num::NonZeroU32::try_from(ifidx)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if is_v4 {
         socket.bind_device_by_index_v4(Some(ifidx))?;
     } else {
@@ -75,7 +76,7 @@ pub async fn receive_packet(socket: &RawSocket) -> io::Result<(Vec<u8>, SocketAd
             .collect();
         let source = source
             .as_socket()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid ICMP source"))?;
+            .expect("packet source should be inet (this is a bug!)");
         trace!("received packet from {source} len={length}: {bytes:02x?}");
         Ok((bytes, source, timestamp))
     };

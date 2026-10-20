@@ -49,7 +49,8 @@ pub fn set_ttl(sock: &UdpSocket, ttl: u32, is_v4: bool) -> io::Result<()> {
         // that's too much work.
         // see socket2::Socket::set_unicast_hops_v6 and std::sys::net::connection::socket::setsockopt
         let fd = libc::c_int::from(sock.as_raw_fd());
-        let option = libc::c_int::try_from(ttl).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let option = libc::c_int::try_from(ttl)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let option_ptr = (&raw const option).cast::<libc::c_void>();
         let option_len = libc::socklen_t::try_from(size_of::<libc::c_int>())
             .expect("sizeof(int) should always fit in a socklen_t (this is a bug!)");

@@ -294,6 +294,7 @@ impl<T: Tracer + Clone> Traceroute<T> {
     pub async fn run_with_output<O>(self, mut output: O) -> io::Result<!>
     where
         O: crate::outputs::Output<T>,
+        <O as crate::outputs::Output<T>>::Error: std::error::Error + Send + Sync + 'static,
     {
         let (probe_tx, probe_rx) = mpsc::channel(CHAN_SIZE);
         let (record_tx, mut record_rx) = mpsc::unbounded_channel();
@@ -315,7 +316,7 @@ impl<T: Tracer + Clone> Traceroute<T> {
         ));
         loop {
             tokio::select! {
-                Some(record) = record_rx.recv() => output.write(&record, self.export_config())?,
+                Some(record) = record_rx.recv() => output.write(&record, self.export_config()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
                 Some(r) = tasks.join_next() => r.expect("sender panicked (this is a bug)")?,
             }
         }

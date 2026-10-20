@@ -5,7 +5,6 @@ use crate::tracers::proto::{retain_icmp_errors_cvt_resp, udp};
 use crate::tracers::socket_utils::{raw as raw_socket, udp as udp_socket};
 use crate::tracers::{self, ResponseState};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
-use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
 use std::ffi::CStr;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -69,9 +68,9 @@ impl tracers::Tracer for DnsTracer {
         message.metadata.recursion_desired = true;
         message.add_query(self.query.clone());
 
-        let mut bytes = Vec::with_capacity(512);
-        let mut encoder = BinEncoder::new(&mut bytes);
-        message.emit(&mut encoder).map_err(protocol_error)?;
+        let bytes = message
+            .to_vec()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         udp_socket::set_ttl(&self.socket, u32::from(num_hops), self.target.is_ipv4())?;
         trace!("sending to {}", self.target);
@@ -196,8 +195,4 @@ impl DnsTracer {
             additional_info: None,
         })
     }
-}
-
-fn protocol_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
