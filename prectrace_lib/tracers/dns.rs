@@ -66,6 +66,7 @@ impl tracers::Tracer for DnsTracer {
     async fn send_probe(&self, num_hops: u8, id: u32) -> io::Result<Self::Probe> {
         let dns_id = get_dns_id(id);
         let mut message = Message::new(dns_id, MessageType::Query, OpCode::Query);
+        message.metadata.recursion_desired = true;
         message.add_query(self.query.clone());
 
         let mut bytes = Vec::with_capacity(512);
