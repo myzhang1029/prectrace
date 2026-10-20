@@ -7,4 +7,5 @@
 #![feature(const_convert)]
 
 pub mod outputs;
+pub mod time;
 pub mod tracers;

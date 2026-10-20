@@ -1,6 +1,5 @@
 mod json;
 mod text;
-mod time_conversion;
 
 use crate::tracers::{Response, Tracer};
 pub use json::JsonOutput;

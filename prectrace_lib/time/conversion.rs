@@ -36,6 +36,7 @@ impl Converter {
         };
         Self { instant_epoch }
     }
+    #[must_use]
     pub fn instant_unix_timestamp(&self, instant: Instant) -> Option<(u64, u32)> {
         let diff = instant.checked_duration_since(self.instant_epoch)?;
         let sec_part = diff.as_secs();
@@ -43,6 +44,7 @@ impl Converter {
         Some((sec_part, ns_part))
     }
 
+    #[must_use]
     pub fn instant_datetime(&self, instant: Instant) -> Option<DateTime<Utc>> {
         self.instant_unix_timestamp(instant)
             .and_then(|(secs, nsecs)| {
@@ -52,6 +54,12 @@ impl Converter {
     }
 
     pub fn init_or_get_global() -> &'static Self {
-        GLOBAL_CONVERTER.get_or_init(Self::new)
+        GLOBAL_CONVERTER.get_or_init(Self::default)
+    }
+}
+
+impl Default for Converter {
+    fn default() -> Self {
+        Self::new()
     }
 }

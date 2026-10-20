@@ -1,5 +1,5 @@
 use super::Output;
-use super::time_conversion::Converter;
+use crate::time::conversion::Converter;
 use crate::tracers::{Probe, Response, Tracer};
 use std::io;
 
