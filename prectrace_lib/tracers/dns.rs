@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
-use tracing::{info, trace};
+use tracing::{debug, trace};
 use zerocopy::TryFromBytes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,17 +86,29 @@ impl tracers::Tracer for DnsTracer {
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
         let mut dns_bytes = [0u8; 4096];
-        tokio::select! {
-            biased;
-            result = self.socket.recv_from(&mut dns_bytes) => {
-                let time = Instant::now();
-                let (length, source) = result?;
-                let message = Message::from_vec(&dns_bytes[..length]).map_err(protocol_error)?;
-                Ok((ReceivedPacket::Dns(message), source, time))
-            }
-            result = raw_socket::receive_packet(&self.icmp_socket) => {
-                let (packet, source, received_time) = result?;
-                Ok((ReceivedPacket::Icmp(packet), source, received_time))
+        loop {
+            tokio::select! {
+                biased;
+                result = self.socket.recv_from(&mut dns_bytes) => {
+                    let time = Instant::now();
+                    let (length, source) = result?;
+                    if source.ip() != self.target.ip(){
+                        continue;
+                    }
+                    let Ok(message) = Message::from_vec(&dns_bytes[..length]) else {
+                        debug!("received malformed DNS answer from server");
+                        continue;
+                    };
+                    trace!("received message {message:?} from {source}");
+                    if message.message_type == MessageType::Response {
+                        break Ok((ReceivedPacket::Dns(message), source, time));
+                    }
+                    debug!("received a {} from the destination??", message.message_type);
+                }
+                result = raw_socket::receive_packet(&self.icmp_socket) => {
+                    let (packet, source, received_time) = result?;
+                    break Ok((ReceivedPacket::Icmp(packet), source, received_time));
+                }
             }
         }
     }
@@ -109,21 +121,14 @@ impl tracers::Tracer for DnsTracer {
         received_time: Instant,
     ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
         match packet {
-            ReceivedPacket::Dns(packet)
-                if packet.id == get_dns_id(probe.id) && source.ip() == self.target.ip() =>
-            {
-                if packet.message_type == MessageType::Response {
-                    Some(tracers::Response {
-                        for_probe: *probe,
-                        source: Some(source),
-                        received_time: Some(received_time),
-                        state: ResponseState::Reached,
-                        additional_info: Some(packet.clone()),
-                    })
-                } else {
-                    info!("Received a `Query` from the destination??");
-                    None
-                }
+            ReceivedPacket::Dns(packet) if packet.id == get_dns_id(probe.id) => {
+                Some(tracers::Response {
+                    for_probe: *probe,
+                    source: Some(source),
+                    received_time: Some(received_time),
+                    state: ResponseState::Reached,
+                    additional_info: Some(packet.clone()),
+                })
             }
             ReceivedPacket::Dns(_) => None,
             ReceivedPacket::Icmp(packet) => {

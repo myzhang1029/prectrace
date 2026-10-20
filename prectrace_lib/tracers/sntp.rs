@@ -13,11 +13,11 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
-use tracing::trace;
+use tracing::{debug, trace};
 use zerocopy::TryFromBytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SntpInfo(Packet, SocketAddr);
+pub struct SntpInfo(Packet, TimestampFormat, SocketAddr);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Probe {
@@ -79,16 +79,29 @@ impl tracers::Tracer for SntpTracer {
 
     async fn receive_packet(&self) -> io::Result<(Self::ReceivedPacket, SocketAddr, Instant)> {
         let mut bytes = [0u8; 4096];
-        tokio::select! {
-            biased;
-            result = self.socket.recv_from(&mut bytes) => {
-                let received_time = Instant::now();
-                let (length, source) = result?;
-                Ok((ReceivedPacket::Sntp(bytes[..length].to_vec()), source, received_time))
-            }
-            result = raw_socket::receive_packet(&self.icmp_socket) => {
-                let (packet, source, received_time) = result?;
-                Ok((ReceivedPacket::Icmp(packet), source, received_time))
+        loop {
+            tokio::select! {
+                biased;
+                result = self.socket.recv_from(&mut bytes) => {
+                    let ntp_t3: TimestampFormat = ntp_proto::unix_time::Instant::now().into();
+                    let received_time = Instant::now();
+                    let (length, source) = result?;
+                    if source.ip() != self.target.ip() {
+                        continue;
+                    }
+                    let Ok((packet, _size)) = Packet::from_bytes(&bytes[..length]) else {
+                        debug!("received malformed NTP response from server");
+                        continue;
+                    };
+                    if packet.mode == Mode::Server {
+                        break Ok((ReceivedPacket::Sntp(packet, ntp_t3), source, received_time));
+                    }
+                    debug!("received a {:?} from the destination??", packet.mode);
+                }
+                result = raw_socket::receive_packet(&self.icmp_socket) => {
+                    let (packet, source, received_time) = result?;
+                    break Ok((ReceivedPacket::Icmp(packet), source, received_time));
+                }
             }
         }
     }
@@ -101,22 +114,18 @@ impl tracers::Tracer for SntpTracer {
         received_time: Instant,
     ) -> Option<tracers::Response<Self::Probe, Self::AdditionalInfo>> {
         match packet {
-            ReceivedPacket::Sntp(bytes) => {
-                let (packet, _size) = Packet::from_bytes(bytes).ok()?;
-                if source.ip() != self.target.ip()
-                    || packet.mode != Mode::Server
-                    || packet.origin_timestamp != probe.transmit_timestamp
-                {
-                    return None;
-                }
+            ReceivedPacket::Sntp(packet, t3)
+                if packet.origin_timestamp == probe.transmit_timestamp =>
+            {
                 Some(tracers::Response {
                     for_probe: *probe,
                     source: Some(source),
                     received_time: Some(received_time),
                     state: ResponseState::Reached,
-                    additional_info: Some(SntpInfo(packet, source)),
+                    additional_info: Some(SntpInfo(*packet, *t3, source)),
                 })
             }
+            ReceivedPacket::Sntp(..) => None,
             ReceivedPacket::Icmp(bytes) => {
                 self.match_icmp_error(probe, bytes, source, received_time)
             }
@@ -130,7 +139,7 @@ impl tracers::Tracer for SntpTracer {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceivedPacket {
-    Sntp(Vec<u8>),
+    Sntp(Packet, TimestampFormat),
     Icmp(Vec<u8>),
 }
 
@@ -198,7 +207,7 @@ const fn ser_tsfmt(ts: TimestampFormat) -> (u32, u32) {
 impl Serialize for SntpInfo {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(14))?;
-        map.serialize_entry("source", &self.1)?;
+        map.serialize_entry("source", &self.2)?;
         map.serialize_entry("leap_indicator", &(self.0.leap_indicator as u8))?;
         map.serialize_entry("version", &self.0.version.value())?;
         map.serialize_entry("mode", &(self.0.mode as u8))?;
@@ -212,9 +221,10 @@ impl Serialize for SntpInfo {
             "reference_timestamp",
             &ser_tsfmt(self.0.reference_timestamp),
         )?;
-        map.serialize_entry("origin_timestamp", &ser_tsfmt(self.0.origin_timestamp))?;
-        map.serialize_entry("receive_timestamp", &ser_tsfmt(self.0.receive_timestamp))?;
-        map.serialize_entry("transmit_timestamp", &ser_tsfmt(self.0.transmit_timestamp))?;
+        map.serialize_entry("t0", &ser_tsfmt(self.0.origin_timestamp))?;
+        map.serialize_entry("t1", &ser_tsfmt(self.0.receive_timestamp))?;
+        map.serialize_entry("t2", &ser_tsfmt(self.0.transmit_timestamp))?;
+        map.serialize_entry("t3", &ser_tsfmt(self.1))?;
         map.end()
     }
 }
