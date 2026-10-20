@@ -183,7 +183,7 @@ impl SntpTracer {
             let Ok((pkt, _size)) = Packet::from_bytes(&udp_packet.data) else {
                 return false;
             };
-            pkt.origin_timestamp == probe.transmit_timestamp
+            pkt.transmit_timestamp == probe.transmit_timestamp
         };
         let state = retain_icmp_errors_cvt_resp(self.target.ip(), packet, L4PROTO_UDP, filter)?;
 
