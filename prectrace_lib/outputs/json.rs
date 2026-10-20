@@ -14,11 +14,12 @@ where
     T: Tracer,
     T::AdditionalInfo: Serialize,
 {
+    type Error = serde_json::Error;
     fn write(
         &mut self,
         response: &Response<T::Probe, T::AdditionalInfo>,
         trace_info: serde_json::Value,
-    ) -> io::Result<()> {
+    ) -> Result<(), serde_json::Error> {
         let converter = Converter::init_or_get_global();
         let sent_time = converter
             .instant_datetime(response.sent_time())
@@ -33,8 +34,7 @@ where
             "additional_info": response.additional_info(),
             "trace_info": trace_info,
         });
-        serde_json::to_writer(io::stdout().lock(), &value)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        serde_json::to_writer(io::stdout().lock(), &value)?;
         println!();
         Ok(())
     }

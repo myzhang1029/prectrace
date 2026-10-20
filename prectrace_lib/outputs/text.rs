@@ -1,17 +1,18 @@
 use super::Output;
 use crate::time::conversion::Converter;
 use crate::tracers::{Probe, Response, Tracer};
-use std::io;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TextOutput;
 
 impl<T: Tracer> Output<T> for TextOutput {
+    type Error = !;
+
     fn write(
         &mut self,
         response: &Response<T::Probe, T::AdditionalInfo>,
         trace_info: serde_json::Value,
-    ) -> io::Result<()> {
+    ) -> Result<(), !> {
         let converter = Converter::init_or_get_global();
         let sent_time = converter
             .instant_datetime(response.sent_time())
