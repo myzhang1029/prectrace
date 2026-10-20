@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{error, trace};
+use tokio::task::JoinSet;
+use tracing::trace;
 
 const CHAN_SIZE: usize = 256;
 
@@ -48,6 +49,15 @@ pub struct Response<P, A> {
 }
 
 impl<P: Probe, A> Response<P, A> {
+    pub const fn new_lost(for_probe: P) -> Self {
+        Self {
+            for_probe,
+            source: None,
+            received_time: None,
+            state: ResponseState::Lost,
+            additional_info: None,
+        }
+    }
     pub const fn probe(&self) -> &P {
         &self.for_probe
     }
@@ -158,6 +168,7 @@ trait TracerExt: Tracer {
         self: Arc<Self>,
         cycle_interval: Duration,
         min_send_spacing: Duration,
+        num_to_reach: u8,
         active_hops: Arc<AtomicU8>,
         probe_tx: mpsc::Sender<Self::Probe>,
     ) -> io::Result<()> {
@@ -167,7 +178,7 @@ trait TracerExt: Tracer {
         loop {
             let cycle_limit = active_hops.load(Ordering::Relaxed);
             let mut hop = 1;
-            while hop <= cycle_limit {
+            while hop < cycle_limit + num_to_reach {
                 if let Some(sent_at) = last_send {
                     let spacing = min_send_spacing.saturating_sub(sent_at.elapsed());
                     if !spacing.is_zero() {
@@ -196,6 +207,7 @@ trait TracerExt: Tracer {
         self: Arc<Self>,
         timeout: Duration,
         active_hops: Arc<AtomicU8>,
+        max_hops: u8,
         mut probe_rx: mpsc::Receiver<Self::Probe>,
         record_tx: mpsc::UnboundedSender<Response<Self::Probe, Self::AdditionalInfo>>,
     ) -> io::Result<()> {
@@ -212,29 +224,31 @@ trait TracerExt: Tracer {
                     trace!("{}: got response", std::any::type_name::<Self>());
                     let (packet, source, received_time) = packet?;
                     pending.retain(|probe| {
+                        let probe_hops = probe.get_num_hops();
                         if let Some(matched_resp) = self.match_probe_to_response(probe, &packet, source, received_time) {
                             if matched_resp.state.is_terminal() {
-                                active_hops.fetch_min(probe.get_num_hops(), Ordering::Relaxed);
+                                // The probe reached and/or was blocked by a firewall
+                                // We can decrement what we think is the number of hops on the path
+                                active_hops.fetch_min(probe_hops, Ordering::Relaxed);
+                            } else if probe.get_num_hops() <= max_hops {
+                                // `is_on_the_way` is `!is_terminal` so `else` implies `is_on_the_way`
+                                // The probe did not reach, and we are still allowed to send probes that
+                                // can travel further (`max_hops`).
+                                // let's see if the current `active_hops` needs to be raised
+                                active_hops.fetch_max(probe_hops, Ordering::Relaxed);
                             }
                             // If `record_rx` is dropped, no one cares about the result anymore
                             record_tx.send(matched_resp).ok();
                             false
-                        } else{
+                        } else {
                             true
                         }
                     });
                 }
                 _ = cleanup.tick() => {
-                    let now = Instant::now();
                     pending.retain(|probe| {
-                        if now.duration_since(probe.get_sent_time()) > timeout {
-                            let lost_resp = Response {
-                                for_probe: probe.clone(),
-                                source: None,
-                                received_time: None,
-                                state: ResponseState::Lost,
-                                additional_info: None,
-                            };
+                        if Instant::now().duration_since(probe.get_sent_time()) > timeout {
+                            let lost_resp = Response::new_lost(probe.clone());
                             // If `record_rx` is dropped, no one cares about the result anymore
                             record_tx.send(lost_resp).ok();
                             false
@@ -250,13 +264,26 @@ trait TracerExt: Tracer {
 
 impl<T: Tracer> TracerExt for T {}
 
+/// A [`Traceroute`] instance administers a [`Tracer`].
+///
+/// # Operation
+///
 #[derive(Debug, Clone)]
 pub struct Traceroute<T: Tracer> {
+    /// The underlying tracer
     tracer: Arc<T>,
+    /// Delay between the end of the one trace and the start of another
     cycle_interval: Duration,
+    /// Delay between successive packets in a trace
     min_send_spacing: Duration,
+    /// How long to wait for a packet to arrive
     timeout: Duration,
-    max_hops: Arc<AtomicU8>,
+    /// Number of packets sent above the critical number of hops
+    num_to_reach: u8,
+    /// Current probed number of hops
+    active_hops: Arc<AtomicU8>,
+    /// Absolute maximum of `active_hops`
+    max_hops: u8,
 }
 
 impl<T: Tracer + Clone> Traceroute<T> {
@@ -270,41 +297,29 @@ impl<T: Tracer + Clone> Traceroute<T> {
     {
         let (probe_tx, probe_rx) = mpsc::channel(CHAN_SIZE);
         let (record_tx, mut record_rx) = mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
 
-        let sender_active_hops = self.max_hops.clone();
-        let tracer = self.tracer.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tracer
-                .send_worker(
-                    self.cycle_interval,
-                    self.min_send_spacing,
-                    sender_active_hops,
-                    probe_tx,
-                )
-                .await
-            {
-                error!("Sender failed: {e}");
+        tasks.spawn(self.tracer.clone().send_worker(
+            self.cycle_interval,
+            self.min_send_spacing,
+            self.num_to_reach,
+            self.active_hops.clone(),
+            probe_tx,
+        ));
+        tasks.spawn(self.tracer.clone().receive_worker(
+            self.timeout,
+            self.active_hops.clone(),
+            self.max_hops,
+            probe_rx,
+            record_tx,
+        ));
+        loop {
+            tokio::select! {
+                Some(record) = record_rx.recv() => output.write(&record, self.export_config())?,
+                Some(r) = tasks.join_next() => r.expect("sender panicked (this is a bug)")?,
             }
-        });
-
-        let receiver_active_hops = self.max_hops.clone();
-        let tracer = self.tracer.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tracer
-                .clone()
-                .receive_worker(self.timeout, receiver_active_hops, probe_rx, record_tx)
-                .await
-            {
-                error!("Receiver failed: {e}");
-            }
-        });
-
-        while let Some(record) = record_rx.recv().await {
-            output.write(&record, self.export_config())?;
         }
-
-        // We always hold one `record_tx`, so `record_rx.recv` will never return `None``
-        unreachable!()
+        // We always hold one `record_tx`, so `record_rx.recv` will never return `None`
     }
 
     fn export_config(&self) -> serde_json::Value {
@@ -314,17 +329,19 @@ impl<T: Tracer + Clone> Traceroute<T> {
             "cycle_interval": self.cycle_interval,
             "min_send_spacing": self.min_send_spacing,
             "timeout": self.timeout,
-            "current_max_hops": self.max_hops.load(Ordering::Relaxed),
+            "current_max_hops": self.active_hops.load(Ordering::Relaxed),
         })
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config<'a> {
-    pub initial_max_hops: u8,
     pub cycle_interval: Duration,
     pub min_send_spacing: Duration,
     pub timeout: Duration,
+    pub num_to_reach: u8,
+    pub initial_hops: u8,
+    pub max_hops: u8,
     pub bind_address: Option<IpAddr>,
     pub bind_interface: Option<&'a CStr>,
 }
@@ -349,7 +366,9 @@ impl Traceroutes {
             cycle_interval: config.cycle_interval,
             min_send_spacing: config.min_send_spacing,
             timeout: config.timeout,
-            max_hops: Arc::new(AtomicU8::new(config.initial_max_hops)),
+            num_to_reach: config.num_to_reach,
+            active_hops: Arc::new(AtomicU8::new(config.initial_hops)),
+            max_hops: config.max_hops,
         }))
     }
     pub async fn new_dns(
@@ -364,7 +383,9 @@ impl Traceroutes {
             cycle_interval: config.cycle_interval,
             min_send_spacing: config.min_send_spacing,
             timeout: config.timeout,
-            max_hops: Arc::new(AtomicU8::new(config.initial_max_hops)),
+            num_to_reach: config.num_to_reach,
+            active_hops: Arc::new(AtomicU8::new(config.initial_hops)),
+            max_hops: config.max_hops,
         }))
     }
     pub async fn new_sntp(target: SocketAddr, config: Config<'_>) -> io::Result<Self> {
@@ -374,7 +395,9 @@ impl Traceroutes {
             cycle_interval: config.cycle_interval,
             min_send_spacing: config.min_send_spacing,
             timeout: config.timeout,
-            max_hops: Arc::new(AtomicU8::new(config.initial_max_hops)),
+            num_to_reach: config.num_to_reach,
+            active_hops: Arc::new(AtomicU8::new(config.initial_hops)),
+            max_hops: config.max_hops,
         }))
     }
 }

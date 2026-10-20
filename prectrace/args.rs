@@ -6,7 +6,8 @@ use std::{ffi::CString, net::IpAddr, str::FromStr, time::Duration};
 const DEFAULT_TIMEOUT: &str = "4s";
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_SPACING: Duration = Duration::from_millis(100);
-const DEFAULT_MAX_HOPS: u8 = 30;
+const DEFAULT_INITIAL_HOPS: u8 = 32;
+const DEFAULT_MAX_HOPS: u8 = 64;
 
 fn parse_duration(value: &str) -> Result<Duration, &'static str> {
     let value = value.trim();
@@ -90,13 +91,25 @@ pub struct Cli {
     #[arg(short = 'T', long)]
     pub sntp: Vec<TraceSpec>,
     /// Query name for DNS traces, in the form of NAME,QTYPE.
-    #[arg(short = 'n', long, value_parser = parse_dns_query,default_value = "example.com,A")]
+    #[arg(short = 'n', long, value_parser = parse_dns_query, default_value = "example.com,A")]
     pub dns_query: hickory_proto::op::Query,
     /// Timeout for each packet.
     #[arg(short = 't', long, value_parser = parse_duration, default_value = DEFAULT_TIMEOUT)]
     pub timeout: Duration,
-    /// Maximum TTL/number of hops in all traces.
-    #[arg(short = 'm', long, default_value_t = DEFAULT_MAX_HOPS)]
+    /// Number of packets to send at or above the current probed number of hops (TTL).
+    /// In other words, only this many packets will reach the target host per round of
+    /// trace, spaced by the `SPACING` setting in the trace specification.
+    ///
+    /// This is mainly useful to send "pairs or triples of packets" for some delay analysis.
+    #[arg(long, default_value_t = 1)]
+    pub num_to_reach: u8,
+    /// Initial number of hops (TTL) to set in a trace. If the packet fails to reach the host
+    /// in so many hops, packets in the next round will have their number of hops (TTL)
+    /// incremented by one, up to the maximum
+    #[arg(short = 'm', long, default_value_t = DEFAULT_INITIAL_HOPS)]
+    pub initial_hops: u8,
+    /// Cap on the number of hops (TTL) for all traces.
+    #[arg(short = 'M', long, default_value_t = DEFAULT_MAX_HOPS)]
     pub max_hops: u8,
     /// Restrict resolution to IPv4.
     #[arg(short = '4', long, conflicts_with = "ipv6")]

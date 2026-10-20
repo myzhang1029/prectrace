@@ -89,10 +89,12 @@ async fn main() -> anyhow::Result<()> {
 
 fn make_trace_config<'a>(spec: &TraceSpec, cli: &'a Cli) -> TraceConfig<'a> {
     TraceConfig {
-        initial_max_hops: cli.max_hops,
         cycle_interval: spec.interval,
         min_send_spacing: spec.spacing,
         timeout: cli.timeout,
+        num_to_reach: cli.num_to_reach,
+        initial_hops: cli.initial_hops,
+        max_hops: cli.max_hops,
         bind_address: cli.address,
         bind_interface: cli.interface.as_deref(),
     }

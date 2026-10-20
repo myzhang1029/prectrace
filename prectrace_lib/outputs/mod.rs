@@ -7,10 +7,7 @@ use serde::Serialize;
 use std::io;
 pub use text::TextOutput;
 
-pub trait Output<T>
-where
-    T: Tracer,
-{
+pub trait Output<T: Tracer> {
     fn write(
         &mut self,
         response: &Response<T::Probe, T::AdditionalInfo>,
