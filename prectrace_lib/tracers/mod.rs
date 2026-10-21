@@ -176,7 +176,7 @@ trait TracerExt: Tracer {
         let mut last_send: Option<Instant> = None;
 
         loop {
-            let cycle_limit = active_hops.load(Ordering::Relaxed);
+            let mut cycle_limit = active_hops.load(Ordering::Relaxed);
             let mut hop = 1;
             while hop < cycle_limit + num_to_reach {
                 if let Some(sent_at) = last_send {
@@ -194,10 +194,7 @@ trait TracerExt: Tracer {
                     .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "receiver stopped"))?;
                 id = id.wrapping_add(1);
                 hop += 1;
-
-                if hop > active_hops.load(Ordering::Relaxed) {
-                    break;
-                }
+                cycle_limit = active_hops.load(Ordering::Relaxed);
             }
             tokio::time::sleep(cycle_interval).await;
         }
