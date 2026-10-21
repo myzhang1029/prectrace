@@ -5,6 +5,7 @@ use chrono::SecondsFormat;
 use serde::Serialize;
 use serde_json::json;
 use std::io;
+use std::time::Duration;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JsonOutput;
@@ -29,7 +30,7 @@ where
             "source": response.source(),
             "state": format!("{:?}", response.state()),
             "sent": sent_time.to_rfc3339_opts(SecondsFormat::AutoSi, true),
-            "rtt_ms": response.rtt().map(|s| s.as_secs_f64()*1000.0),
+            "rtt_ms": response.rtt().as_ref().map(Duration::as_millis_f64),
             "id": response.probe().get_id(),
             "additional_info": response.additional_info(),
             "trace_info": trace_info,

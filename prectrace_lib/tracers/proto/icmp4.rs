@@ -6,7 +6,10 @@
 //! header does not include the `IPv[46]` header. This is because `socket2`'s API
 //! will create its own L3 header.
 
-#![expect(clippy::empty_enums, reason = "spurious lint due to zerocopy_derive::TryFromBytes")]
+#![expect(
+    clippy::empty_enums,
+    reason = "spurious lint due to zerocopy_derive::TryFromBytes"
+)]
 
 use super::common::{Error, convert_error};
 use crate::tracers::{self, constants::L4PROTO_ICMP};

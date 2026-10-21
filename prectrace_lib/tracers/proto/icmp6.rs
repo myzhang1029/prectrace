@@ -1,4 +1,7 @@
-#![expect(clippy::empty_enums, reason = "spurious lint due to zerocopy_derive::TryFromBytes")]
+#![expect(
+    clippy::empty_enums,
+    reason = "spurious lint due to zerocopy_derive::TryFromBytes"
+)]
 
 use super::common::{Error, convert_error};
 use crate::tracers::{self, constants::L4PROTO_ICMP6};
@@ -106,7 +109,6 @@ pub struct IcmpEchoHeader {
     pub identifier: [u8; 2],
     pub sequence: [u8; 2],
 }
-
 
 #[derive(
     zerocopy_derive::TryFromBytes,

@@ -1,4 +1,7 @@
-#![expect(clippy::empty_enums, reason = "spurious lint due to zerocopy_derive::TryFromBytes")]
+#![expect(
+    clippy::empty_enums,
+    reason = "spurious lint due to zerocopy_derive::TryFromBytes"
+)]
 
 #[derive(
     Debug,
